@@ -100,7 +100,7 @@ pub fn write(
         author: sig.clone().into(),
         committer: sig.into(),
         encoding: None,
-        message: "git-review: update notes\n".into(),
+        message: "remark: update notes\n".into(),
         extra_headers: Default::default(),
     };
     let commit_id = repo
@@ -112,7 +112,7 @@ pub fn write(
         notes_ref,
         commit_id,
         PreviousValue::Any,
-        "git-review: update notes",
+        "remark: update notes",
     )
     .context("update notes ref")?;
 
@@ -124,10 +124,10 @@ fn default_signature() -> gix_actor::Signature {
     let name = std::env::var("GIT_AUTHOR_NAME")
         .or_else(|_| std::env::var("GIT_COMMITTER_NAME"))
         .or_else(|_| std::env::var("USER"))
-        .unwrap_or_else(|_| "git-review".to_string());
+        .unwrap_or_else(|_| "remark".to_string());
     let email = std::env::var("GIT_AUTHOR_EMAIL")
         .or_else(|_| std::env::var("GIT_COMMITTER_EMAIL"))
-        .unwrap_or_else(|_| "git-review@localhost".to_string());
+        .unwrap_or_else(|_| "remark@localhost".to_string());
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

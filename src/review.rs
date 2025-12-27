@@ -58,7 +58,7 @@ pub fn encode_note(review: &Review) -> String {
     let json = serde_json::to_string_pretty(review).unwrap_or_else(|_| "{}".to_string());
     let prompt = render_prompt(review);
     format!(
-        "<!-- git-review:1 -->\n```json\n{json}\n```\n\n# Review (LLM Prompt)\n\n{prompt}\n"
+        "<!-- remark:1 -->\n```json\n{json}\n```\n\n# Review (LLM Prompt)\n\n{prompt}\n"
     )
 }
 
@@ -102,4 +102,3 @@ pub fn render_prompt(review: &Review) -> String {
     }
     out
 }
-
