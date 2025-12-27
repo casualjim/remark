@@ -1,0 +1,14 @@
+[package]
+name = "git-review"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+crossterm = "0.29"
+gix = "0.76"
+ratatui = "0.29"
+syntastica = "0.6"
+syntastica-parsers = { version = "0.6", features = ["most"] }
+syntastica-themes = "0.6"
+tempfile = "3"
