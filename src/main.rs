@@ -1,9 +1,16 @@
 mod app;
+mod clipboard;
+mod diff;
 mod git;
+mod highlight;
 mod notes;
+mod prompt_cmd;
 mod review;
 mod ui;
 
 fn main() -> anyhow::Result<()> {
-    app::run()
+    match std::env::args().nth(1).as_deref() {
+        Some("prompt") => prompt_cmd::run(),
+        _ => app::run(),
+    }
 }

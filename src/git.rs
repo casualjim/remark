@@ -6,16 +6,10 @@ use gix::{ObjectId, Repository};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewKind {
+    All,
     Unstaged,
     Staged,
     Base,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FileSourceKind {
-    Worktree,
-    Index,
-    HeadTree,
 }
 
 pub fn default_base_ref(repo: &Repository) -> Option<String> {
@@ -43,9 +37,10 @@ pub fn default_base_ref(repo: &Repository) -> Option<String> {
 
 pub fn note_key_oid(repo: &Repository, kind: ViewKind, base_ref: Option<&str>) -> Result<ObjectId> {
     let mut key = String::new();
-    key.push_str("git-review-key:v1\n");
+    key.push_str("remark-key:v1\n");
     key.push_str("kind:");
     key.push_str(match kind {
+        ViewKind::All => "all",
         ViewKind::Unstaged => "unstaged",
         ViewKind::Staged => "staged",
         ViewKind::Base => "base",
@@ -56,12 +51,14 @@ pub fn note_key_oid(repo: &Repository, kind: ViewKind, base_ref: Option<&str>) -
         key.push_str(b);
         key.push('\n');
     }
-    let blob_id = repo.write_blob(key.as_bytes()).context("write note key blob")?;
-    Ok(blob_id.detach())
+    let oid = gix_object::compute_hash(repo.object_hash(), gix_object::Kind::Blob, key.as_bytes())
+        .context("compute note key oid")?;
+    Ok(oid)
 }
 
 pub fn list_unstaged_paths(repo: &Repository) -> Result<Vec<String>> {
     let mut out = BTreeSet::<String>::new();
+    let workdir = repo.workdir().map(ToOwned::to_owned);
     let iter = repo
         .status(gix::progress::Discard)
         .context("init status")?
@@ -73,7 +70,15 @@ pub fn list_unstaged_paths(repo: &Repository) -> Result<Vec<String>> {
         if item.summary().is_none() {
             continue;
         }
-        out.insert(item.rela_path().to_str_lossy().into_owned());
+        let path = item.rela_path().to_str_lossy().into_owned();
+        if let Some(wt) = &workdir {
+            let abs = wt.join(&path);
+            if abs.is_dir() {
+                // `gix status` may report untracked directories; we only review files.
+                continue;
+            }
+        }
+        out.insert(path);
     }
 
     Ok(out.into_iter().collect())
@@ -102,29 +107,8 @@ pub fn list_staged_paths(repo: &Repository) -> Result<Vec<String>> {
 }
 
 pub fn list_base_paths(repo: &Repository, base_ref: &str) -> Result<Vec<String>> {
-    let head_commit = repo.head_commit().context("read HEAD commit")?;
-    let head_id = head_commit.id;
-
-    let base_commit = repo
-        .rev_parse_single(base_ref.as_bytes().as_bstr())
-        .with_context(|| format!("resolve base ref '{base_ref}'"))?
-        .object()
-        .context("peel base object")?
-        .peel_to_commit()
-        .context("base is not a commit")?;
-    let base_id = base_commit.id;
-
-    let merge_base = repo
-        .merge_base(head_id, base_id)
-        .context("find merge base")?;
-    let base_tree = merge_base
-        .object()
-        .context("merge-base object")?
-        .peel_to_commit()
-        .context("merge-base peel to commit")?
-        .tree()
-        .context("merge-base tree")?;
-    let head_tree = head_commit.tree().context("head tree")?;
+    let base_tree = merge_base_tree(repo, base_ref)?;
+    let head_tree = repo.head_tree().context("head tree")?;
 
     let changes = repo
         .diff_tree_to_tree(Some(&base_tree), Some(&head_tree), None)
@@ -145,52 +129,84 @@ pub fn list_base_paths(repo: &Repository, base_ref: &str) -> Result<Vec<String>>
     Ok(out.into_iter().collect())
 }
 
-pub fn read_file(repo: &Repository, source: FileSourceKind, path: &str) -> Result<String> {
-    match source {
-        FileSourceKind::Worktree => {
-            let wt = repo
-                .workdir()
-                .context("repo has no workdir (needed for worktree view)")?;
-            let abs = wt.join(path);
-            std::fs::read_to_string(&abs)
-                .with_context(|| format!("read worktree file '{}'", abs.display()))
-        }
-        FileSourceKind::Index => read_index_file(repo, path),
-        FileSourceKind::HeadTree => read_head_file(repo, path),
+pub fn merge_base_tree<'repo>(repo: &'repo Repository, base_ref: &str) -> Result<gix::Tree<'repo>> {
+    let head_commit = repo.head_commit().context("read HEAD commit")?;
+    let head_id = head_commit.id;
+
+    let base_commit = repo
+        .rev_parse_single(base_ref.as_bytes().as_bstr())
+        .with_context(|| format!("resolve base ref '{base_ref}'"))?
+        .object()
+        .context("peel base object")?
+        .peel_to_commit()
+        .context("base is not a commit")?;
+    let base_id = base_commit.id;
+
+    let merge_base = repo
+        .merge_base(head_id, base_id)
+        .context("find merge base")?;
+    merge_base
+        .object()
+        .context("merge-base object")?
+        .peel_to_commit()
+        .context("merge-base peel to commit")?
+        .tree()
+        .context("merge-base tree")
+}
+
+pub fn try_read_worktree(repo: &Repository, path: &str) -> Result<Option<String>> {
+    let Some(wt) = repo.workdir() else {
+        return Ok(None);
+    };
+    let abs = wt.join(path);
+    match std::fs::read(&abs) {
+        Ok(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).to_string())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) if err.kind() == std::io::ErrorKind::IsADirectory => Ok(None),
+        Err(err) => Err(err).with_context(|| format!("read worktree file '{}'", abs.display())),
     }
 }
 
-fn read_index_file(repo: &Repository, path: &str) -> Result<String> {
+pub fn try_read_index(repo: &Repository, path: &str) -> Result<Option<String>> {
     let index = repo.index_or_empty().context("open index")?;
-    let entry = index
-        .entry_by_path(path.as_bytes().as_bstr())
-        .with_context(|| format!("index entry for '{path}' not found"))?;
+    let Some(entry) = index.entry_by_path(path.as_bytes().as_bstr()) else {
+        return Ok(None);
+    };
     let blob = repo
         .find_object(entry.id)
         .context("find index blob")?
         .try_into_blob()
         .context("index entry is not a blob")?;
-    Ok(String::from_utf8_lossy(blob.data.as_ref()).to_string())
+    Ok(Some(String::from_utf8_lossy(blob.data.as_ref()).to_string()))
 }
 
-fn read_head_file(repo: &Repository, path: &str) -> Result<String> {
+pub fn try_read_head(repo: &Repository, path: &str) -> Result<Option<String>> {
     let tree = repo.head_tree().context("read HEAD tree")?;
-    let entry = tree
+    let Some(entry) = tree
         .lookup_entry_by_path(path)
         .with_context(|| format!("lookup '{path}' in HEAD tree"))?
-        .with_context(|| format!("'{path}' not found in HEAD tree"))?;
+    else {
+        return Ok(None);
+    };
     let blob = entry
         .object()
         .context("load tree entry")?
         .try_into_blob()
         .context("tree entry is not a blob")?;
-    Ok(String::from_utf8_lossy(blob.data.as_ref()).to_string())
+    Ok(Some(String::from_utf8_lossy(blob.data.as_ref()).to_string()))
 }
 
-pub fn view_file_source(view: ViewKind) -> FileSourceKind {
-    match view {
-        ViewKind::Unstaged => FileSourceKind::Worktree,
-        ViewKind::Staged => FileSourceKind::Index,
-        ViewKind::Base => FileSourceKind::HeadTree,
-    }
+pub fn try_read_tree(tree: &gix::Tree<'_>, path: &str) -> Result<Option<String>> {
+    let Some(entry) = tree
+        .lookup_entry_by_path(path)
+        .with_context(|| format!("lookup '{path}' in tree"))?
+    else {
+        return Ok(None);
+    };
+    let blob = entry
+        .object()
+        .context("load tree entry")?
+        .try_into_blob()
+        .context("tree entry is not a blob")?;
+    Ok(Some(String::from_utf8_lossy(blob.data.as_ref()).to_string()))
 }

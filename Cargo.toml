@@ -1,5 +1,5 @@
 [package]
-name = "git-review"
+name = "remark"
 version = "0.1.0"
 edition = "2024"
 
@@ -10,8 +10,16 @@ gix = { version = "0.76", features = ["revision", "tree-editor"] }
 gix-actor = "0.36"
 gix-date = "0.11"
 gix-hash = "0.21"
+gix-object = "0.53"
 gix-ref = "0.56"
-ratatui = "0.29"
+ratatui = "0.30.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 smallvec = "1"
+gix-diff = "0.56"
+syntastica = "0.6"
+syntastica-parsers = { version = "0.6", features = ["most"] }
+syntastica-themes = "0.6"
+hyperpolyglot = "0.1"
+copypasta = "0.10"
+base64 = "0.22"
