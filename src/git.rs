@@ -1,186 +1,196 @@
-use std::path::PathBuf;
-use std::process::Command;
+use std::collections::BTreeSet;
 
-use anyhow::{Context, Result, bail};
-use gix::ObjectId;
-use gix::bstr::ByteSlice;
+use anyhow::{Context, Result};
+use gix::bstr::{BStr, ByteSlice};
+use gix::{ObjectId, Repository};
 
-#[derive(Debug, Clone)]
-pub struct CommitEntry {
-    pub id: ObjectId,
-    pub short_id: String,
-    pub summary: String,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewKind {
+    Unstaged,
+    Staged,
+    Base,
 }
 
-pub fn list_commits(repo: &gix::Repository, limit: usize) -> Result<Vec<CommitEntry>> {
-    let head = repo.head_id().context("read HEAD")?.detach();
-    let mut walk = repo
-        .rev_walk([head])
-        .all()
-        .context("start revision walk")?;
-
-    let mut commits = Vec::new();
-    while commits.len() < limit {
-        let Some(info) = walk.next() else { break };
-        let info = info?;
-        let id = info.id;
-        let commit = repo.find_commit(id).context("find commit")?;
-        let summary = commit
-            .message_raw_sloppy()
-            .lines()
-            .next()
-            .map(|l| l.to_str_lossy().into_owned())
-            .unwrap_or_default();
-        let full = id.to_string();
-        let short_id = full.chars().take(8).collect::<String>();
-        commits.push(CommitEntry {
-            id,
-            short_id,
-            summary,
-        });
-    }
-
-    Ok(commits)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileSourceKind {
+    Worktree,
+    Index,
+    HeadTree,
 }
 
-pub struct GitBackend {
-    workdir: PathBuf,
-    pub notes_ref: String,
-}
-
-impl GitBackend {
-    pub fn new(workdir: PathBuf, notes_ref: String) -> Self {
-        Self { workdir, notes_ref }
-    }
-
-    pub fn read_note(&self, oid: &ObjectId) -> Result<Option<String>> {
-        let out = self.git_cmd()
-            .args([
-                "notes",
-                &format!("--ref={}", self.notes_ref),
-                "show",
-                &oid.to_string(),
-            ])
-            .output()
-            .context("run git notes show")?;
-
-        if out.status.success() {
-            return Ok(Some(String::from_utf8_lossy(&out.stdout).to_string()));
-        }
-
-        // No note is a normal case: exit 1, message on stderr.
-        if out.status.code() == Some(1) {
-            return Ok(None);
-        }
-
-        bail!(
-            "git notes show failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        )
-    }
-
-    pub fn write_note(&self, oid: &ObjectId, text: &str) -> Result<()> {
-        let text = text.trim_end_matches(['\n', '\r']);
-        if text.is_empty() {
-            let out = self.git_cmd()
-                .args([
-                    "notes",
-                    &format!("--ref={}", self.notes_ref),
-                    "remove",
-                    &oid.to_string(),
-                ])
-                .output()
-                .context("run git notes remove")?;
-            if out.status.success() || out.status.code() == Some(1) {
-                return Ok(());
+pub fn default_base_ref(repo: &Repository) -> Option<String> {
+    // Prefer configured upstream if available.
+    repo.rev_parse_single("@{upstream}".as_bytes().as_bstr())
+        .ok()
+        .map(|_| "@{upstream}".to_string())
+        .or_else(|| {
+            // Try common branch names.
+            for candidate in ["refs/heads/main", "refs/heads/master"] {
+                if repo.try_find_reference(candidate).ok().flatten().is_some() {
+                    return Some(candidate.to_string());
+                }
             }
-            bail!(
-                "git notes remove failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            )
-        }
+            None
+        })
+        .or_else(|| {
+            // Best-effort: origin/HEAD symbolic ref.
+            repo.try_find_reference("refs/remotes/origin/HEAD")
+                .ok()
+                .flatten()
+                .and_then(|r| r.target().try_name().map(|n| n.to_string()))
+        })
+}
 
-        let mut tmp = tempfile::NamedTempFile::new().context("create temp file for note")?;
-        std::io::Write::write_all(&mut tmp, text.as_bytes()).context("write note temp file")?;
-        std::io::Write::write_all(&mut tmp, b"\n").context("write note temp file newline")?;
+pub fn note_key_oid(repo: &Repository, kind: ViewKind, base_ref: Option<&str>) -> Result<ObjectId> {
+    let mut key = String::new();
+    key.push_str("git-review-key:v1\n");
+    key.push_str("kind:");
+    key.push_str(match kind {
+        ViewKind::Unstaged => "unstaged",
+        ViewKind::Staged => "staged",
+        ViewKind::Base => "base",
+    });
+    key.push('\n');
+    if let Some(b) = base_ref {
+        key.push_str("base:");
+        key.push_str(b);
+        key.push('\n');
+    }
+    let blob_id = repo.write_blob(key.as_bytes()).context("write note key blob")?;
+    Ok(blob_id.detach())
+}
 
-        let out = self
-            .git_cmd()
-            .args([
-                "notes",
-                &format!("--ref={}", self.notes_ref),
-                "add",
-                "-f",
-                "-F",
-                tmp.path()
-                    .to_str()
-                    .context("temp file path is not utf-8")?,
-                &oid.to_string(),
-            ])
-            .output()
-            .context("run git notes add")?;
-        if out.status.success() {
-            return Ok(());
+pub fn list_unstaged_paths(repo: &Repository) -> Result<Vec<String>> {
+    let mut out = BTreeSet::<String>::new();
+    let iter = repo
+        .status(gix::progress::Discard)
+        .context("init status")?
+        .into_index_worktree_iter(Vec::new())
+        .context("status index-worktree")?;
+
+    for item in iter {
+        let item = item.context("status item")?;
+        if item.summary().is_none() {
+            continue;
         }
-        bail!(
-            "git notes add failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        )
+        out.insert(item.rela_path().to_str_lossy().into_owned());
     }
 
-    pub fn diff_commit(&self, oid: &ObjectId, width: u16) -> Result<String> {
-        let out = self
-            .git_cmd()
-            .args([
-                "--no-pager",
-                "-c",
-                "diff.external=difft",
-                "show",
-                "--ext-diff",
-                "--pretty=format:",
-                &oid.to_string(),
-            ])
-            .env("DFT_COLOR", "never")
-            .env("DFT_SYNTAX_HIGHLIGHT", "off")
-            .env("DFT_BACKGROUND", "dark")
-            .env("DFT_WIDTH", width.to_string())
-            .output()
-            .context("run git show with difftastic")?;
+    Ok(out.into_iter().collect())
+}
 
-        if out.status.success() {
-            return Ok(String::from_utf8_lossy(&out.stdout).to_string());
-        }
+pub fn list_staged_paths(repo: &Repository) -> Result<Vec<String>> {
+    let head_tree_id = repo.head_tree_id().context("get HEAD tree id")?;
+    let index = repo
+        .index_or_load_from_head_or_empty()
+        .context("open worktree index")?;
 
-        let fallback = self
-            .git_cmd()
-            .args([
-                "--no-pager",
-                "-c",
-                "color.ui=false",
-                "show",
-                "--pretty=format:",
-                "--patch",
-                &oid.to_string(),
-            ])
-            .output()
-            .context("run git show fallback")?;
-        if fallback.status.success() {
-            let mut out = String::new();
-            out.push_str("difftastic unavailable; showing unified diff\n\n");
-            out.push_str(&String::from_utf8_lossy(&fallback.stdout));
-            return Ok(out);
-        }
+    let mut out = BTreeSet::<String>::new();
+    repo.tree_index_status(
+        &head_tree_id,
+        &*index,
+        None,
+        gix::status::tree_index::TrackRenames::Disabled,
+        |change, _, _| {
+            out.insert(change.location().to_str_lossy().into_owned());
+            Ok::<_, std::convert::Infallible>(gix::diff::index::Action::Continue)
+        },
+    )
+    .context("tree-index status")?;
 
-        bail!(
-            "diff failed; difftastic stderr: {}; git stderr: {}",
-            String::from_utf8_lossy(&out.stderr),
-            String::from_utf8_lossy(&fallback.stderr)
-        )
+    Ok(out.into_iter().collect())
+}
+
+pub fn list_base_paths(repo: &Repository, base_ref: &str) -> Result<Vec<String>> {
+    let head_commit = repo.head_commit().context("read HEAD commit")?;
+    let head_id = head_commit.id;
+
+    let base_commit = repo
+        .rev_parse_single(base_ref.as_bytes().as_bstr())
+        .with_context(|| format!("resolve base ref '{base_ref}'"))?
+        .object()
+        .context("peel base object")?
+        .peel_to_commit()
+        .context("base is not a commit")?;
+    let base_id = base_commit.id;
+
+    let merge_base = repo
+        .merge_base(head_id, base_id)
+        .context("find merge base")?;
+    let base_tree = merge_base
+        .object()
+        .context("merge-base object")?
+        .peel_to_commit()
+        .context("merge-base peel to commit")?
+        .tree()
+        .context("merge-base tree")?;
+    let head_tree = head_commit.tree().context("head tree")?;
+
+    let changes = repo
+        .diff_tree_to_tree(Some(&base_tree), Some(&head_tree), None)
+        .context("diff trees")?;
+
+    let mut out = BTreeSet::<String>::new();
+    for ch in changes {
+        use gix::object::tree::diff::ChangeDetached as C;
+        let loc: &BStr = match &ch {
+            C::Addition { location, .. } => location.as_ref(),
+            C::Deletion { location, .. } => location.as_ref(),
+            C::Modification { location, .. } => location.as_ref(),
+            C::Rewrite { location, .. } => location.as_ref(),
+        };
+        out.insert(loc.to_str_lossy().into_owned());
     }
 
-    fn git_cmd(&self) -> Command {
-        let mut cmd = Command::new("git");
-        cmd.current_dir(&self.workdir);
-        cmd
+    Ok(out.into_iter().collect())
+}
+
+pub fn read_file(repo: &Repository, source: FileSourceKind, path: &str) -> Result<String> {
+    match source {
+        FileSourceKind::Worktree => {
+            let wt = repo
+                .workdir()
+                .context("repo has no workdir (needed for worktree view)")?;
+            let abs = wt.join(path);
+            std::fs::read_to_string(&abs)
+                .with_context(|| format!("read worktree file '{}'", abs.display()))
+        }
+        FileSourceKind::Index => read_index_file(repo, path),
+        FileSourceKind::HeadTree => read_head_file(repo, path),
+    }
+}
+
+fn read_index_file(repo: &Repository, path: &str) -> Result<String> {
+    let index = repo.index_or_empty().context("open index")?;
+    let entry = index
+        .entry_by_path(path.as_bytes().as_bstr())
+        .with_context(|| format!("index entry for '{path}' not found"))?;
+    let blob = repo
+        .find_object(entry.id)
+        .context("find index blob")?
+        .try_into_blob()
+        .context("index entry is not a blob")?;
+    Ok(String::from_utf8_lossy(blob.data.as_ref()).to_string())
+}
+
+fn read_head_file(repo: &Repository, path: &str) -> Result<String> {
+    let tree = repo.head_tree().context("read HEAD tree")?;
+    let entry = tree
+        .lookup_entry_by_path(path)
+        .with_context(|| format!("lookup '{path}' in HEAD tree"))?
+        .with_context(|| format!("'{path}' not found in HEAD tree"))?;
+    let blob = entry
+        .object()
+        .context("load tree entry")?
+        .try_into_blob()
+        .context("tree entry is not a blob")?;
+    Ok(String::from_utf8_lossy(blob.data.as_ref()).to_string())
+}
+
+pub fn view_file_source(view: ViewKind) -> FileSourceKind {
+    match view {
+        ViewKind::Unstaged => FileSourceKind::Worktree,
+        ViewKind::Staged => FileSourceKind::Index,
+        ViewKind::Base => FileSourceKind::HeadTree,
     }
 }
