@@ -12,8 +12,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::app::Mode;
-use crate::git::CommitEntry;
+use crate::app::{Focus, Mode};
+use crate::git::ViewKind;
 
 pub struct Ui {
     pub terminal: Terminal<CrosstermBackend<Stdout>>,
@@ -36,22 +36,34 @@ impl Ui {
     }
 }
 
-pub fn estimated_diff_width(total_width: u16) -> u16 {
-    total_width.saturating_sub(44).max(20)
+pub struct DrawState<'a> {
+    pub view: ViewKind,
+    pub base_ref: Option<&'a str>,
+    pub focus: Focus,
+    pub mode: Mode,
+    pub notes_ref: &'a str,
+    pub review_dirty: bool,
+
+    pub files: &'a [String],
+    pub selected_file: usize,
+
+    pub file_path: &'a str,
+    pub file_lines: &'a [String],
+    pub file_cursor_line: usize,
+    pub file_scroll: u16,
+    pub commented_lines: &'a [u32],
+    pub current_comment: &'a str,
+
+    pub comment_buffer: &'a NoteBuffer,
+    pub comment_dirty: bool,
+
+    pub status: &'a str,
+    pub show_help: bool,
+    pub show_prompt: bool,
+    pub prompt_text: &'a str,
 }
 
-pub fn draw(
-    f: &mut ratatui::Frame,
-    commits: &[CommitEntry],
-    selected: usize,
-    note: (&NoteBuffer, bool),
-    diff: Option<&Text<'static>>,
-    diff_scroll: u16,
-    mode: Mode,
-    status: &str,
-    show_help: bool,
-    notes_ref: &str,
-) {
+pub fn draw(f: &mut ratatui::Frame, s: DrawState<'_>) {
     let outer = f.area();
     let [main, footer] = Layout::default()
         .direction(Direction::Vertical)
@@ -63,121 +75,220 @@ pub fn draw(
         .constraints([Constraint::Length(42), Constraint::Min(1)])
         .areas(main);
 
-    let [note_area, diff_area] = Layout::default()
+    let [comment_area, file_area] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(10), Constraint::Min(1)])
         .areas(right);
 
-    draw_commits(f, left, commits, selected);
-    draw_note(f, note_area, note.0, note.1, mode, notes_ref);
-    draw_diff(f, diff_area, diff, diff_scroll);
-    draw_footer(f, footer, commits, selected, mode, status);
+    draw_files(f, left, s.files, s.selected_file, s.view, s.base_ref, s.focus);
+    draw_comment_panel(
+        f,
+        comment_area,
+        s.mode,
+        s.focus,
+        s.comment_buffer,
+        s.comment_dirty,
+        s.current_comment,
+        s.notes_ref,
+        s.review_dirty,
+    );
+    draw_file_view(
+        f,
+        file_area,
+        s.file_path,
+        s.file_lines,
+        s.file_cursor_line,
+        s.file_scroll,
+        s.commented_lines,
+        s.focus,
+    );
+    draw_footer(f, footer, s.view, s.base_ref, s.status, s.review_dirty);
 
-    if show_help {
+    if s.show_help {
         draw_help(f, outer);
     }
-}
 
-fn draw_commits(f: &mut ratatui::Frame, area: Rect, commits: &[CommitEntry], selected: usize) {
-    let items = commits
-        .iter()
-        .map(|c| {
-            let line = Line::from(vec![
-                Span::styled(
-                    format!("{:8}", c.short_id),
-                    Style::default().fg(Color::Yellow),
-                ),
-                Span::raw(" "),
-                Span::raw(c.summary.clone()),
-            ]);
-            ListItem::new(line)
-        })
-        .collect::<Vec<_>>();
+    if s.show_prompt {
+        draw_prompt(f, outer, s.prompt_text);
+    }
 
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Commits"))
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-        .highlight_symbol("▸ ");
-
-    let mut state = ListState::default();
-    state.select(Some(selected));
-    f.render_stateful_widget(list, area, &mut state);
-}
-
-fn draw_note(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    note: &NoteBuffer,
-    dirty: bool,
-    mode: Mode,
-    notes_ref: &str,
-) {
-    let title = match (mode, dirty) {
-        (Mode::EditNote, true) => format!("Note (editing, unsaved) — {notes_ref}"),
-        (Mode::EditNote, false) => format!("Note (editing) — {notes_ref}"),
-        (Mode::Browse, true) => format!("Note (unsaved) — {notes_ref}"),
-        (Mode::Browse, false) => format!("Note — {notes_ref}"),
-    };
-
-    let text = Text::from(
-        note.lines
-            .iter()
-            .map(|l| Line::from(Span::raw(l.clone())))
-            .collect::<Vec<_>>(),
-    );
-
-    let note_height = area.height.saturating_sub(2).max(1);
-    let scroll = note
-        .cursor_row
-        .saturating_sub(note_height as usize - 1) as u16;
-
-    let para = Paragraph::new(text)
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
-    f.render_widget(para, area);
-
-    if mode == Mode::EditNote {
-        let cursor_y = area.y.saturating_add(1).saturating_add(note.cursor_row as u16);
-        let cursor_y = cursor_y.saturating_sub(scroll);
-        let cursor_x = area.x.saturating_add(1).saturating_add(note.cursor_col as u16);
-        if cursor_y < area.y + area.height && cursor_x < area.x + area.width {
+    if s.mode == Mode::EditComment && s.focus == Focus::Comment {
+        // Cursor position within comment box.
+        let cursor_y = comment_area.y + 1 + s.comment_buffer.cursor_row as u16;
+        let cursor_x = comment_area.x + 1 + s.comment_buffer.cursor_col as u16;
+        if cursor_y < comment_area.y + comment_area.height && cursor_x < comment_area.x + comment_area.width {
             f.set_cursor_position((cursor_x, cursor_y));
         }
     }
 }
 
-fn draw_diff(f: &mut ratatui::Frame, area: Rect, diff: Option<&Text<'static>>, scroll: u16) {
-    let text = diff.cloned().unwrap_or_else(|| Text::raw("No diff"));
+fn draw_files(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    files: &[String],
+    selected: usize,
+    view: ViewKind,
+    base_ref: Option<&str>,
+    focus: Focus,
+) {
+    let title = match (view, base_ref) {
+        (ViewKind::Unstaged, _) => "Unstaged",
+        (ViewKind::Staged, _) => "Staged",
+        (ViewKind::Base, Some(b)) => {
+            // Keep it short.
+            if b.len() > 34 {
+                "Base"
+            } else {
+                "Base"
+            }
+        }
+        (ViewKind::Base, None) => "Base (unset)",
+    };
+
+    let items = files
+        .iter()
+        .map(|p| ListItem::new(Line::from(Span::raw(p.clone()))))
+        .collect::<Vec<_>>();
+
+    let mut block = Block::default().borders(Borders::ALL).title(title);
+    if focus == Focus::Files {
+        block = block.border_style(Style::default().fg(Color::Cyan));
+    }
+
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+        .highlight_symbol("▸ ");
+
+    let mut state = ListState::default();
+    if !files.is_empty() {
+        state.select(Some(selected));
+    }
+    f.render_stateful_widget(list, area, &mut state);
+}
+
+fn draw_comment_panel(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    mode: Mode,
+    focus: Focus,
+    buffer: &NoteBuffer,
+    dirty: bool,
+    current_comment: &str,
+    notes_ref: &str,
+    review_dirty: bool,
+) {
+    let title = match (mode, dirty) {
+        (Mode::EditComment, true) => format!("Comment (editing, unsaved) — {notes_ref}"),
+        (Mode::EditComment, false) => format!("Comment (editing) — {notes_ref}"),
+        (_, _) if review_dirty => format!("Comment — {notes_ref} (review unsaved)"),
+        _ => format!("Comment — {notes_ref}"),
+    };
+
+    let mut block = Block::default().borders(Borders::ALL).title(title);
+    if focus == Focus::Comment {
+        block = block.border_style(Style::default().fg(Color::Cyan));
+    }
+
+    let text = if mode == Mode::EditComment {
+        Text::from(
+            buffer
+                .lines
+                .iter()
+                .map(|l| Line::from(Span::raw(l.clone())))
+                .collect::<Vec<_>>(),
+        )
+    } else if current_comment.is_empty() {
+        Text::raw("No comment on this line. Press 'c' to add one.")
+    } else {
+        Text::raw(current_comment)
+    };
+
     let para = Paragraph::new(text)
-        .block(Block::default().borders(Borders::ALL).title("Diff (difftastic)"))
+        .block(block)
         .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
+        .scroll((0, 0));
+    f.render_widget(para, area);
+}
+
+fn draw_file_view(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    path: &str,
+    lines: &[String],
+    cursor_line: usize,
+    scroll: u16,
+    commented_lines: &[u32],
+    focus: Focus,
+) {
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .title(if path.is_empty() { "File" } else { path });
+    if focus == Focus::Lines {
+        block = block.border_style(Style::default().fg(Color::Cyan));
+    }
+
+    let view_height = area.height.saturating_sub(2).max(1) as usize;
+    let scroll_usize = scroll as usize;
+    let end = (scroll_usize + view_height).min(lines.len());
+
+    let mut rendered = Vec::with_capacity(end.saturating_sub(scroll_usize));
+    for (idx, line) in lines[scroll_usize..end].iter().enumerate() {
+        let actual = scroll_usize + idx;
+        let line_no = (actual + 1) as u32;
+
+        let has_comment = commented_lines.binary_search(&line_no).is_ok();
+        let marker = if has_comment { "●" } else { " " };
+        let gutter = format!("{marker} {:4} ", line_no);
+
+        let mut spans = Vec::new();
+        spans.push(Span::styled(
+            gutter,
+            Style::default().fg(Color::DarkGray),
+        ));
+        spans.push(Span::raw(line.clone()));
+
+        let mut line_style = Style::default();
+        if focus == Focus::Lines && actual == cursor_line {
+            line_style = line_style.add_modifier(Modifier::REVERSED);
+        }
+        rendered.push(Line::from(spans).style(line_style));
+    }
+
+    let para = Paragraph::new(Text::from(rendered))
+        .block(block)
+        .wrap(Wrap { trim: false });
     f.render_widget(para, area);
 }
 
 fn draw_footer(
     f: &mut ratatui::Frame,
     area: Rect,
-    commits: &[CommitEntry],
-    selected: usize,
-    mode: Mode,
+    view: ViewKind,
+    base_ref: Option<&str>,
     status: &str,
+    review_dirty: bool,
 ) {
-    let current = commits.get(selected);
-    let left = match (mode, current) {
-        (Mode::Browse, Some(c)) => format!("{}  {}  (e edit, r refresh, ? help, q quit)", c.short_id, c.summary),
-        (Mode::EditNote, Some(c)) => format!("{}  Editing note (Ctrl+S save, Esc leave)", c.short_id),
-        (_, None) => "(no commit)".to_string(),
+    let view_label = match (view, base_ref) {
+        (ViewKind::Unstaged, _) => "unstaged",
+        (ViewKind::Staged, _) => "staged",
+        (ViewKind::Base, Some(b)) => b,
+        (ViewKind::Base, None) => "base",
     };
 
-    let mut line = left;
+    let mut left = format!(
+        "view={}  (2/3/4)  Tab focus  c comment  d delete  Ctrl+S save  p prompt  ? help  q quit",
+        view_label
+    );
+    if review_dirty {
+        left.push_str("  [unsaved]");
+    }
     if !status.is_empty() {
-        line.push_str("  |  ");
-        line.push_str(status);
+        left.push_str("  |  ");
+        left.push_str(status);
     }
 
-    let para = Paragraph::new(line)
+    let para = Paragraph::new(left)
         .style(Style::default().fg(Color::Gray))
         .alignment(Alignment::Left);
     f.render_widget(para, area);
@@ -185,21 +296,43 @@ fn draw_footer(
 
 fn draw_help(f: &mut ratatui::Frame, area: Rect) {
     let help = Text::from(vec![
-        Line::from("Keys"),
-        Line::from("  Up/Down   select commit"),
-        Line::from("  PgUp/PgDn scroll diff"),
-        Line::from("  e         edit note"),
-        Line::from("  Ctrl+S    save note"),
-        Line::from("  Esc       leave edit mode"),
-        Line::from("  r         refresh current commit"),
-        Line::from("  ?         toggle help"),
-        Line::from("  q         quit (browse mode)"),
+        Line::from("Views"),
+        Line::from("  2         Unstaged changes (worktree)"),
+        Line::from("  3         Staged changes (index)"),
+        Line::from("  4         Base changes (merge-base..HEAD)"),
+        Line::from(""),
+        Line::from("Navigation"),
+        Line::from("  Tab       Switch focus (files/lines)"),
+        Line::from("  Up/Down   Move selection / cursor"),
+        Line::from("  PgUp/Dn   Scroll file view"),
+        Line::from(""),
+        Line::from("Comments"),
+        Line::from("  c         Edit comment at current line"),
+        Line::from("  d         Delete comment at current line"),
+        Line::from("  Esc       Apply comment (in editor)"),
+        Line::from("  Ctrl+S    Save review note (git-notes)"),
+        Line::from(""),
+        Line::from("Other"),
+        Line::from("  p         Toggle collated prompt preview"),
+        Line::from("  ?         Toggle this help"),
+        Line::from("  q         Quit"),
     ]);
 
-    let popup = centered_rect(70, 60, area);
+    let popup = centered_rect(76, 80, area);
     f.render_widget(Clear, popup);
     let block = Block::default().borders(Borders::ALL).title("Help");
     let para = Paragraph::new(help).block(block).wrap(Wrap { trim: false });
+    f.render_widget(para, popup);
+}
+
+fn draw_prompt(f: &mut ratatui::Frame, area: Rect, prompt: &str) {
+    let popup = centered_rect(82, 82, area);
+    f.render_widget(Clear, popup);
+    let block = Block::default().borders(Borders::ALL).title("LLM Prompt Preview (from note)");
+    let para = Paragraph::new(Text::raw(prompt))
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .scroll((0, 0));
     f.render_widget(para, popup);
 }
 
@@ -224,9 +357,9 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 
 #[derive(Debug, Clone)]
 pub struct NoteBuffer {
-    lines: Vec<String>,
-    cursor_row: usize,
-    cursor_col: usize,
+    pub(crate) lines: Vec<String>,
+    pub(crate) cursor_row: usize,
+    pub(crate) cursor_col: usize,
 }
 
 impl NoteBuffer {

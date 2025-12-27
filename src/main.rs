@@ -1,6 +1,7 @@
 mod app;
 mod git;
-mod highlight;
+mod notes;
+mod review;
 mod ui;
 
 fn main() -> anyhow::Result<()> {
