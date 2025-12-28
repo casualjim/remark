@@ -164,3 +164,36 @@ impl ConsumeHunk for CollectUnified {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hunk_header_includes_context_hint_when_available() {
+        let before = "fn keep() {}\nfn change() { 1 }\nfn tail() {}\n";
+        let after = "fn keep() {}\nfn change() { 2 }\nfn tail() {}\n";
+
+        let lines = unified_file_diff("a/x.rs", "b/x.rs", Some(before), Some(after)).unwrap();
+        let header = lines
+            .iter()
+            .find(|l| l.kind == Kind::HunkHeader)
+            .map(|l| l.text.as_str())
+            .unwrap();
+        assert!(header.contains("fn keep()"), "{header}");
+    }
+
+    #[test]
+    fn hunk_header_falls_back_to_changed_line_when_no_context() {
+        let before = "one\n";
+        let after = "two\n";
+
+        let lines = unified_file_diff("a/t.txt", "b/t.txt", Some(before), Some(after)).unwrap();
+        let header = lines
+            .iter()
+            .find(|l| l.kind == Kind::HunkHeader)
+            .map(|l| l.text.as_str())
+            .unwrap();
+        assert!(header.contains("one") || header.contains("two"), "{header}");
+    }
+}
