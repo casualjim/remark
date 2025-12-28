@@ -3092,6 +3092,7 @@ dependencies = [
  "syntastica",
  "syntastica-parsers",
  "syntastica-themes",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]

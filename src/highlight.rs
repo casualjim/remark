@@ -51,12 +51,11 @@ impl Highlighter {
     ) -> Option<Lang> {
         if let Some(wt) = repo.workdir() {
             let abs = wt.join(repo_relative_path);
-            if abs.is_file() {
-                if let Ok(Some(d)) = hyperpolyglot::detect(&abs) {
-                    if let Ok(lang) = Lang::for_name(d.language(), &self.language_set) {
-                        return Some(lang);
-                    }
-                }
+            if abs.is_file()
+                && let Ok(Some(d)) = hyperpolyglot::detect(&abs)
+                && let Ok(lang) = Lang::for_name(d.language(), &self.language_set)
+            {
+                return Some(lang);
             }
         }
 

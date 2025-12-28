@@ -97,8 +97,8 @@ pub fn write(
     let commit = objs::Commit {
         tree: tree_id,
         parents,
-        author: sig.clone().into(),
-        committer: sig.into(),
+        author: sig.clone(),
+        committer: sig,
         encoding: None,
         message: "remark: update notes\n".into(),
         extra_headers: Default::default(),

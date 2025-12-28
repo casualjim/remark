@@ -9,6 +9,7 @@ use gix::ObjectId;
 use crate::git::ViewKind;
 use crate::highlight::Highlighter;
 use crate::review::{LineSide, Review};
+use unicode_width::UnicodeWidthStr;
 
 const DEFAULT_NOTES_REF: &str = "refs/notes/remark";
 
@@ -150,6 +151,10 @@ struct App {
     diff_cursor: usize,
     diff_scroll: u16,
     diff_viewport_height: u16,
+    diff_viewport_width: u16,
+    diff_row_offsets: Vec<u32>,
+    diff_row_heights: Vec<u16>,
+    diff_total_visual_lines: u32,
 
     editor_target: Option<CommentTarget>,
     editor_buffer: crate::ui::NoteBuffer,
@@ -205,6 +210,10 @@ impl App {
             diff_cursor: 0,
             diff_scroll: 0,
             diff_viewport_height: 1,
+            diff_viewport_width: 1,
+            diff_row_offsets: Vec::new(),
+            diff_row_heights: Vec::new(),
+            diff_total_visual_lines: 0,
             editor_target: None,
             editor_buffer: crate::ui::NoteBuffer::new(),
             status: String::new(),
@@ -233,8 +242,11 @@ impl App {
             let rects = crate::ui::layout(main);
             self.files_viewport_height = rects.files.height.saturating_sub(2).max(1);
             self.diff_viewport_height = rects.diff.height.saturating_sub(2).max(1);
+            self.diff_viewport_width = rects.diff.width.saturating_sub(2).max(1);
+            self.recompute_diff_metrics(self.diff_viewport_width);
             self.ensure_file_visible(self.files_viewport_height);
             self.ensure_diff_visible(self.diff_viewport_height);
+            self.clamp_diff_scroll();
 
             ui.terminal
                 .draw(|f| {
@@ -254,6 +266,11 @@ impl App {
                             diff_rows: &self.diff_rows,
                             diff_cursor: self.diff_cursor,
                             diff_scroll: self.diff_scroll,
+                            diff_cursor_visual: self
+                                .diff_row_offsets
+                                .get(self.diff_cursor)
+                                .copied()
+                                .unwrap_or(0),
                             editor_target: self.editor_target.as_ref(),
                             editor_buffer: &self.editor_buffer,
                             status: &self.status,
@@ -306,12 +323,10 @@ impl App {
 
         if self.show_help {
             // While help is open, treat most keys as inert.
-            if key.code == KeyCode::Esc {
-                self.show_help = false;
-            } else if key.code == KeyCode::Char('?')
+            let is_plain_qmark = key.code == KeyCode::Char('?')
                 && !key.modifiers.contains(KeyModifiers::CONTROL)
-                && !key.modifiers.contains(KeyModifiers::ALT)
-            {
+                && !key.modifiers.contains(KeyModifiers::ALT);
+            if key.code == KeyCode::Esc || is_plain_qmark {
                 self.show_help = false;
             }
             return Ok(false);
@@ -484,9 +499,9 @@ impl App {
                 } else if rects.diff.contains((m.column, m.row).into()) {
                     self.focus = Focus::Diff;
                     let inner_y = m.row.saturating_sub(rects.diff.y + 1) as usize;
-                    let idx = self.diff_scroll as usize + inner_y;
-                    if idx < self.diff_rows.len() {
-                        self.diff_cursor = idx;
+                    let visual = self.diff_scroll as u32 + inner_y as u32;
+                    if !self.diff_rows.is_empty() {
+                        self.diff_cursor = self.diff_row_at_visual_line(visual);
                         // Click in the left gutter to comment.
                         let inner_x = m.column.saturating_sub(rects.diff.x + 1);
                         if inner_x <= 12 {
@@ -581,10 +596,10 @@ impl App {
                 )?;
                 let note = crate::notes::read(&self.repo, &self.notes_ref, &oid)
                     .with_context(|| format!("read file note for '{}'", e.path))?;
-                if let Some(text) = note.as_deref() {
-                    if let Some(fr) = crate::review::decode_file_note(text) {
-                        self.review.files.insert(e.path.clone(), fr);
-                    }
+                if let Some(text) = note.as_deref()
+                    && let Some(fr) = crate::review::decode_file_note(text)
+                {
+                    self.review.files.insert(e.path.clone(), fr);
                 }
             }
         } else {
@@ -711,6 +726,7 @@ impl App {
         };
 
         let (before, after) = self.read_before_after(base_tree.as_ref(), &path)?;
+        drop(base_tree);
 
         let before_label = if before.is_some() {
             format!("a/{path}")
@@ -756,6 +772,7 @@ impl App {
             .position(|r| matches!(r, RenderRow::Unified(_) | RenderRow::SideBySide(_)))
             .unwrap_or(0);
         self.diff_scroll = 0;
+        self.recompute_diff_metrics(self.diff_viewport_width);
         self.status = path;
         Ok(())
     }
@@ -805,21 +822,153 @@ impl App {
             self.diff_cursor = 0;
             return;
         }
-        let viewport_height = viewport_height.max(1) as usize;
-        let scroll = self.diff_scroll as usize;
-        if self.diff_cursor < scroll {
-            self.diff_scroll = self.diff_cursor as u16;
-            return;
+        let viewport = viewport_height.max(1) as u32;
+        let cursor_top = self
+            .diff_row_offsets
+            .get(self.diff_cursor)
+            .copied()
+            .unwrap_or(0);
+        let cursor_h = self
+            .diff_row_heights
+            .get(self.diff_cursor)
+            .copied()
+            .unwrap_or(1)
+            .max(1) as u32;
+        let cursor_bottom = cursor_top.saturating_add(cursor_h.saturating_sub(1));
+
+        let mut scroll = self.diff_scroll as u32;
+        if cursor_top < scroll {
+            scroll = cursor_top;
+        } else if cursor_bottom >= scroll.saturating_add(viewport) {
+            scroll = cursor_bottom.saturating_add(1).saturating_sub(viewport);
         }
-        if self.diff_cursor >= scroll + viewport_height {
-            self.diff_scroll = (self.diff_cursor + 1 - viewport_height) as u16;
+
+        let max_scroll = self
+            .diff_total_visual_lines
+            .saturating_sub(viewport)
+            .min(u16::MAX as u32);
+        if scroll > max_scroll {
+            scroll = max_scroll;
+        }
+        self.diff_scroll = scroll as u16;
+    }
+
+    fn clamp_diff_scroll(&mut self) {
+        let viewport = self.diff_viewport_height.max(1) as u32;
+        let max_scroll = self
+            .diff_total_visual_lines
+            .saturating_sub(viewport)
+            .min(u16::MAX as u32);
+        if (self.diff_scroll as u32) > max_scroll {
+            self.diff_scroll = max_scroll as u16;
         }
     }
 
+    fn diff_row_at_visual_line(&self, visual: u32) -> usize {
+        if self.diff_rows.is_empty() {
+            return 0;
+        }
+        if visual >= self.diff_total_visual_lines {
+            return self.diff_rows.len().saturating_sub(1);
+        }
+        let i = self.diff_row_offsets.partition_point(|&off| off <= visual);
+        i.saturating_sub(1)
+            .min(self.diff_rows.len().saturating_sub(1))
+    }
+
+    fn recompute_diff_metrics(&mut self, inner_width: u16) {
+        let width = inner_width.max(1);
+        let old_max = self
+            .diff_rows
+            .iter()
+            .filter_map(|r| match r {
+                RenderRow::Unified(r) => r.old_line,
+                RenderRow::SideBySide(r) => r.old_line,
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        let new_max = self
+            .diff_rows
+            .iter()
+            .filter_map(|r| match r {
+                RenderRow::Unified(r) => r.new_line,
+                RenderRow::SideBySide(r) => r.new_line,
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        let old_w = old_max.to_string().len().max(4);
+        let new_w = new_max.to_string().len().max(4);
+
+        self.diff_row_offsets.clear();
+        self.diff_row_heights.clear();
+        self.diff_row_offsets.reserve(self.diff_rows.len());
+        self.diff_row_heights.reserve(self.diff_rows.len());
+
+        let mut offset: u32 = 0;
+        for row in &self.diff_rows {
+            // Build a single plain-text line that matches how we render (styles don't affect wrapping).
+            let rendered = match row {
+                RenderRow::FileHeader { path } => {
+                    let old_s = " ".repeat(old_w);
+                    let new_s = " ".repeat(new_w);
+                    format!("  {old_s} {new_s} │ {path}")
+                }
+                RenderRow::Section { text } => {
+                    // We render section lines padded to fit, so they never wrap.
+                    let mut s = format!("┄┄ {text} ┄┄");
+                    let w = width as usize;
+                    let len = s.width();
+                    if len < w {
+                        s.push_str(&" ".repeat(w - len));
+                    }
+                    s
+                }
+                RenderRow::SideBySide(_) => String::new(),
+                RenderRow::Unified(r) => {
+                    let diff_prefix = match r.kind {
+                        crate::diff::Kind::Add => '+',
+                        crate::diff::Kind::Remove => '-',
+                        crate::diff::Kind::Context => ' ',
+                        _ => ' ',
+                    };
+                    let old_s = r
+                        .old_line
+                        .map(|n| format!("{n:>old_w$}"))
+                        .unwrap_or_else(|| " ".repeat(old_w));
+                    let new_s = r
+                        .new_line
+                        .map(|n| format!("{n:>new_w$}"))
+                        .unwrap_or_else(|| " ".repeat(new_w));
+                    let code = r
+                        .spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>();
+                    format!(" {diff_prefix} {old_s} {new_s} │ {code}")
+                }
+            };
+
+            let h = match row {
+                RenderRow::SideBySide(_) => 1usize,
+                _ => word_wrap_line_count(&rendered, width),
+            }
+            .max(1);
+
+            let h_u16 = h.min(u16::MAX as usize) as u16;
+            self.diff_row_offsets.push(offset);
+            self.diff_row_heights.push(h_u16);
+            offset = offset.saturating_add(h_u16 as u32);
+        }
+        self.diff_total_visual_lines = offset;
+    }
+
     fn current_comment_target(&self) -> Option<CommentTarget> {
-        let Some(path) = self.files.get(self.file_selected).map(|e| e.path.as_str()) else {
-            return None;
-        };
+        let path = self
+            .files
+            .get(self.file_selected)
+            .map(|e| e.path.as_str())?;
         let row = self.diff_rows.get(self.diff_cursor)?;
         let locator = match row {
             RenderRow::FileHeader { .. } => CommentLocator::File,
@@ -1051,15 +1200,15 @@ impl App {
 
         self.reload_diff_for_selected()?;
 
-        if let Some(n) = keep_new_line {
-            if let Some(idx) = self.diff_rows.iter().position(|r| match r {
+        if let Some(n) = keep_new_line
+            && let Some(idx) = self.diff_rows.iter().position(|r| match r {
                 RenderRow::Unified(r) => r.new_line == Some(n),
                 RenderRow::SideBySide(r) => r.new_line == Some(n),
                 RenderRow::Section { .. } => false,
                 RenderRow::FileHeader { .. } => false,
-            }) {
-                self.diff_cursor = idx;
-            }
+            })
+        {
+            self.diff_cursor = idx;
         }
 
         Ok(())
@@ -1256,20 +1405,104 @@ impl App {
         let right_hl = self.highlighter.highlight_lang(lang, &right_block)?;
 
         for (row_idx, line_idx) in left_map {
-            if let Some(line) = left_hl.get(line_idx).cloned() {
-                if let RenderRow::SideBySide(r) = &mut rows[row_idx] {
-                    r.left_spans = line;
-                }
+            if let Some(line) = left_hl.get(line_idx).cloned()
+                && let RenderRow::SideBySide(r) = &mut rows[row_idx]
+            {
+                r.left_spans = line;
             }
         }
         for (row_idx, line_idx) in right_map {
-            if let Some(line) = right_hl.get(line_idx).cloned() {
-                if let RenderRow::SideBySide(r) = &mut rows[row_idx] {
-                    r.right_spans = line;
-                }
+            if let Some(line) = right_hl.get(line_idx).cloned()
+                && let RenderRow::SideBySide(r) = &mut rows[row_idx]
+            {
+                r.right_spans = line;
             }
         }
 
         Ok(rows)
     }
+}
+
+fn word_wrap_line_count(s: &str, width: u16) -> usize {
+    let width = width.max(1) as usize;
+    if s.is_empty() {
+        return 1;
+    }
+
+    let mut lines = 1usize;
+    let mut cur = 0usize;
+
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.peek().copied() {
+        if ch.is_whitespace() {
+            // Whitespace is a break opportunity; it can span multiple lines.
+            let mut ws = String::new();
+            while let Some(c) = chars.peek().copied() {
+                if !c.is_whitespace() {
+                    break;
+                }
+                ws.push(c);
+                chars.next();
+            }
+            let mut ws_w = ws.width();
+            while ws_w > 0 {
+                let space_left = width.saturating_sub(cur);
+                if space_left == 0 {
+                    lines += 1;
+                    cur = 0;
+                    continue;
+                }
+                let take = ws_w.min(space_left);
+                ws_w -= take;
+                cur += take;
+                if ws_w > 0 && cur == width {
+                    lines += 1;
+                    cur = 0;
+                }
+            }
+        } else {
+            // Consume a non-whitespace run ("word").
+            let mut word = String::new();
+            while let Some(c) = chars.peek().copied() {
+                if c.is_whitespace() {
+                    break;
+                }
+                word.push(c);
+                chars.next();
+            }
+            let mut w = word.width();
+            if w == 0 {
+                continue;
+            }
+            loop {
+                let space_left = width.saturating_sub(cur);
+                if space_left == 0 {
+                    lines += 1;
+                    cur = 0;
+                    continue;
+                }
+                if w <= space_left {
+                    cur += w;
+                    break;
+                }
+                // Word doesn't fit.
+                if cur > 0 {
+                    lines += 1;
+                    cur = 0;
+                    continue;
+                }
+                // Word is longer than a full line; split.
+                lines += w / width;
+                w %= width;
+                cur = 0;
+                if w == 0 {
+                    break;
+                }
+                cur = w;
+                break;
+            }
+        }
+    }
+
+    lines
 }
