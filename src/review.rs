@@ -315,6 +315,7 @@ pub fn render_prompt(review: &Review) -> String {
     }
 
     let mut todos: Vec<(String, String)> = Vec::new();
+    let mut wrote_any = false;
 
     for (path, f) in &review.files {
         let has_unresolved = f
@@ -328,6 +329,7 @@ pub fn render_prompt(review: &Review) -> String {
         if !has_unresolved {
             continue;
         }
+        wrote_any = true;
         out.push_str(&format!("## {path}\n"));
         if let Some(fc) = f
             .file_comment
@@ -356,6 +358,11 @@ pub fn render_prompt(review: &Review) -> String {
         out.push('\n');
     }
 
+    if !wrote_any {
+        out.push_str("No comments.\n");
+        return out;
+    }
+
     if !todos.is_empty() {
         out.push_str("## TODOs\n");
         for (path, c) in todos {
@@ -364,4 +371,164 @@ pub fn render_prompt(review: &Review) -> String {
         out.push('\n');
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn line_key_plain_number_is_new_side() {
+        let k: LineKey = serde_json::from_str("\"12\"").unwrap();
+        assert_eq!(k.side, LineSide::New);
+        assert_eq!(k.line, 12);
+    }
+
+    #[test]
+    fn line_key_roundtrip_has_prefix() {
+        let k = LineKey {
+            side: LineSide::Old,
+            line: 7,
+        };
+        let s = serde_json::to_string(&k).unwrap();
+        assert_eq!(s, "\"o:7\"");
+        let k2: LineKey = serde_json::from_str(&s).unwrap();
+        assert_eq!(k2.side, LineSide::Old);
+        assert_eq!(k2.line, 7);
+    }
+
+    #[test]
+    fn file_note_roundtrip_v2() {
+        let mut fr = FileReview::default();
+        fr.file_comment = Some(Comment {
+            body: "file-level".to_string(),
+            resolved: true,
+        });
+        fr.comments.insert(
+            LineKey {
+                side: LineSide::New,
+                line: 3,
+            },
+            Comment {
+                body: "hello".to_string(),
+                resolved: false,
+            },
+        );
+        fr.comments.insert(
+            LineKey {
+                side: LineSide::Old,
+                line: 1,
+            },
+            Comment {
+                body: "restore this".to_string(),
+                resolved: true,
+            },
+        );
+
+        let note = encode_file_note(&fr);
+        let decoded = decode_file_note(&note).unwrap();
+        assert_eq!(
+            decoded.file_comment.as_ref().unwrap().body,
+            "file-level".to_string()
+        );
+        assert!(decoded.file_comment.as_ref().unwrap().resolved);
+        assert_eq!(decoded.comments.len(), 2);
+        assert_eq!(
+            decoded
+                .comments
+                .get(&LineKey {
+                    side: LineSide::New,
+                    line: 3
+                })
+                .unwrap()
+                .body,
+            "hello"
+        );
+        assert!(
+            !decoded
+                .comments
+                .get(&LineKey {
+                    side: LineSide::New,
+                    line: 3
+                })
+                .unwrap()
+                .resolved
+        );
+    }
+
+    #[test]
+    fn file_note_v1_upgrades_to_v2_comments_unresolved() {
+        let note = r#"<!-- remark-file:1 -->
+```json
+{
+  "version": 1,
+  "file": {
+    "file_comment": "do the thing",
+    "comments": {
+      "12": "new side (implicit)",
+      "o:2": "old side",
+      "n:3": "new side"
+    }
+  }
+}
+```"#;
+
+        let fr = decode_file_note(note).unwrap();
+        assert_eq!(fr.file_comment.as_ref().unwrap().body, "do the thing");
+        assert!(!fr.file_comment.as_ref().unwrap().resolved);
+        assert_eq!(fr.comments.len(), 3);
+        assert_eq!(
+            fr.comments
+                .get(&LineKey {
+                    side: LineSide::New,
+                    line: 12
+                })
+                .unwrap()
+                .body,
+            "new side (implicit)"
+        );
+        assert!(
+            !fr.comments
+                .get(&LineKey {
+                    side: LineSide::Old,
+                    line: 2
+                })
+                .unwrap()
+                .resolved
+        );
+    }
+
+    #[test]
+    fn prompt_omits_resolved_comments_and_adds_todos() {
+        let mut r = Review::new("all", None);
+
+        r.set_file_comment("a.rs", "File todo".to_string());
+        r.set_line_comment("a.rs", LineSide::New, 10, "Fix this".to_string());
+        r.set_line_comment("a.rs", LineSide::Old, 2, "Restore this".to_string());
+
+        // Resolve one line and the file comment; only the unresolved line should remain.
+        r.toggle_file_comment_resolved("a.rs");
+        r.toggle_line_comment_resolved("a.rs", LineSide::Old, 2);
+
+        // File with only resolved comments should not appear.
+        r.set_file_comment("b.rs", "All done".to_string());
+        r.toggle_file_comment_resolved("b.rs");
+
+        let p = render_prompt(&r);
+        assert!(p.contains("## a.rs"));
+        assert!(p.contains("Line 10 (new): Fix this"));
+        assert!(!p.contains("File: File todo"));
+        assert!(!p.contains("Restore this"));
+        assert!(!p.contains("## b.rs"));
+        assert!(!p.contains("## TODOs"));
+    }
+
+    #[test]
+    fn prompt_shows_no_comments_when_all_resolved() {
+        let mut r = Review::new("all", None);
+        r.set_file_comment("a.rs", "done".to_string());
+        r.toggle_file_comment_resolved("a.rs");
+        let p = render_prompt(&r);
+        assert!(p.contains("No comments."));
+    }
 }
