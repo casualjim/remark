@@ -12,6 +12,7 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use unicode_width::UnicodeWidthChar;
 
 use crate::app::{
     CommentLocator, CommentTarget, DiffViewMode, FileChangeKind, FileEntry, FileStageKind, Focus,
@@ -77,6 +78,7 @@ pub struct DrawState<'a> {
     pub diff_rows: &'a [RenderRow],
     pub diff_cursor: usize,
     pub diff_scroll: u16,
+    pub diff_cursor_visual: u32,
 
     pub editor_target: Option<&'a CommentTarget>,
     pub editor_buffer: &'a NoteBuffer,
@@ -194,10 +196,6 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let view_height = inner.height.max(1) as usize;
-    let scroll = s.diff_scroll as usize;
-    let end = (scroll + view_height).min(s.diff_rows.len());
-
     let old_max = s
         .diff_rows
         .iter()
@@ -227,10 +225,8 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
     let is_new_file = matches!(selected_change, Some(FileChangeKind::Added));
     let is_deleted_file = matches!(selected_change, Some(FileChangeKind::Deleted));
 
-    let mut rendered: Vec<Line<'static>> = Vec::with_capacity(end.saturating_sub(scroll));
-    for (i, row) in s.diff_rows[scroll..end].iter().enumerate() {
-        let abs_idx = scroll + i;
-
+    let mut rendered: Vec<Line<'static>> = Vec::with_capacity(s.diff_rows.len());
+    for (abs_idx, row) in s.diff_rows.iter().enumerate() {
         let path = s.files.get(s.file_selected).map(|e| e.path.as_str());
         let locator = match (row, path) {
             (RenderRow::FileHeader { .. }, Some(_)) => Some(CommentLocator::File),
@@ -304,20 +300,21 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
                 let old_s = " ".repeat(old_w);
                 let new_s = " ".repeat(new_w);
 
-                let mut spans: Vec<Span<'static>> = Vec::with_capacity(8);
-                spans.push(Span::styled(marker.to_string(), marker_style));
-                spans.push(Span::raw(" "));
-                spans.push(Span::raw(" "));
-                spans.push(Span::styled(old_s, Style::default().fg(Color::DarkGray)));
-                spans.push(Span::raw(" "));
-                spans.push(Span::styled(new_s, Style::default().fg(Color::DarkGray)));
-                spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
-                spans.push(Span::styled(
-                    path.clone(),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ));
+                let spans: Vec<Span<'static>> = vec![
+                    Span::styled(marker.to_string(), marker_style),
+                    Span::raw(" "),
+                    Span::raw(" "),
+                    Span::styled(old_s, Style::default().fg(Color::DarkGray)),
+                    Span::raw(" "),
+                    Span::styled(new_s, Style::default().fg(Color::DarkGray)),
+                    Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        path.clone(),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ];
 
                 let mut style = Style::default().bg(Color::Rgb(25, 25, 25));
                 if abs_idx == s.diff_cursor {
@@ -371,7 +368,7 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
                 let mut spans: Vec<Span<'static>> = Vec::with_capacity(10 + r.spans.len());
                 spans.push(Span::styled(marker.to_string(), marker_style));
                 spans.push(Span::styled(diff_prefix.to_string(), diff_prefix_style));
-                spans.push(Span::raw(if commentable { " " } else { " " }));
+                spans.push(Span::raw(" "));
                 spans.push(Span::styled(old_s, Style::default().fg(Color::DarkGray)));
                 spans.push(Span::raw(" "));
                 spans.push(Span::styled(new_s, Style::default().fg(Color::DarkGray)));
@@ -404,31 +401,74 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
                     new_w,
                     is_new_file,
                     is_deleted_file,
+                    inner.width as usize,
                 ));
             }
         }
     }
 
-    let para = Paragraph::new(Text::from(rendered)).wrap(Wrap { trim: false });
+    let para = Paragraph::new(Text::from(rendered))
+        .wrap(Wrap { trim: false })
+        .scroll((s.diff_scroll, 0));
     f.render_widget(para, inner);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_side_by_side_line(
     row: &SideBySideRow,
     selected: bool,
-    commentable: bool,
+    _commentable: bool,
     has_comment: bool,
     comment_resolved: bool,
     old_w: usize,
     new_w: usize,
     is_new_file: bool,
     is_deleted_file: bool,
+    total_width: usize,
 ) -> Line<'static> {
     fn tint(spans: &[Span<'static>], bg: Color) -> Vec<Span<'static>> {
         spans
             .iter()
             .map(|s| Span::styled(s.content.to_string(), s.style.bg(bg)))
             .collect()
+    }
+
+    fn str_width(s: &str) -> usize {
+        s.chars()
+            .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+            .sum()
+    }
+
+    fn spans_truncate_to_width(
+        spans: &[Span<'static>],
+        max_width: usize,
+    ) -> (Vec<Span<'static>>, usize) {
+        let mut out: Vec<Span<'static>> = Vec::new();
+        let mut used = 0usize;
+
+        for s in spans {
+            if used >= max_width {
+                break;
+            }
+            let mut chunk = String::new();
+            for ch in s.content.chars() {
+                let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if used + w > max_width {
+                    break;
+                }
+                chunk.push(ch);
+                used += w;
+            }
+            if !chunk.is_empty() {
+                out.push(Span::styled(chunk, s.style));
+            }
+        }
+
+        (out, used)
+    }
+
+    fn pad_spaces(width: usize, style: Style) -> Span<'static> {
+        Span::styled(" ".repeat(width), style)
     }
 
     let (marker, marker_style) = if has_comment && comment_resolved {
@@ -470,25 +510,63 @@ fn render_side_by_side_line(
         _ => Style::default().fg(Color::DarkGray),
     };
 
+    let left_bg = if !is_deleted_file && matches!(row.left_kind, Some(crate::diff::Kind::Remove)) {
+        Some(Color::Rgb(60, 0, 0))
+    } else {
+        None
+    };
+    let right_bg = if !is_new_file && matches!(row.right_kind, Some(crate::diff::Kind::Add)) {
+        Some(Color::Rgb(0, 50, 0))
+    } else {
+        None
+    };
+
     let mut left_spans = row.left_spans.clone();
     let mut right_spans = row.right_spans.clone();
-    if !is_deleted_file && matches!(row.left_kind, Some(crate::diff::Kind::Remove)) {
-        left_spans = tint(&left_spans, Color::Rgb(60, 0, 0));
+    if let Some(bg) = left_bg {
+        left_spans = tint(&left_spans, bg);
     }
-    if !is_new_file && matches!(row.right_kind, Some(crate::diff::Kind::Add)) {
-        right_spans = tint(&right_spans, Color::Rgb(0, 50, 0));
+    if let Some(bg) = right_bg {
+        right_spans = tint(&right_spans, bg);
     }
 
-    let mut spans: Vec<Span<'static>> =
-        Vec::with_capacity(12 + left_spans.len() + right_spans.len());
+    // Allocate fixed-width columns so the right side never "slides" into the left side.
+    // Layout:
+    //   marker + sp + oldnum + sp + prefix + sp + leftcode + sp + │ + sp + newnum + sp + prefix + sp + rightcode
+    let fixed_left = str_width(marker) + 1 + old_w + 1 + 1 + 1;
+    let fixed_sep = 3usize; // " │ "
+    let fixed_right = new_w + 1 + 1 + 1;
+    let avail = total_width.saturating_sub(fixed_left + fixed_sep + fixed_right);
+    let left_code_w = avail / 2;
+    let right_code_w = avail.saturating_sub(left_code_w);
+
+    let left_pad_style = match left_bg {
+        Some(bg) => Style::default().bg(bg),
+        None => Style::default(),
+    };
+    let right_pad_style = match right_bg {
+        Some(bg) => Style::default().bg(bg),
+        None => Style::default(),
+    };
+
+    let (mut left_code, left_used) = spans_truncate_to_width(&left_spans, left_code_w);
+    if left_used < left_code_w {
+        left_code.push(pad_spaces(left_code_w - left_used, left_pad_style));
+    }
+    let (mut right_code, right_used) = spans_truncate_to_width(&right_spans, right_code_w);
+    if right_used < right_code_w {
+        right_code.push(pad_spaces(right_code_w - right_used, right_pad_style));
+    }
+
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(16 + left_code.len() + right_code.len());
     spans.push(Span::styled(marker.to_string(), marker_style));
-    spans.push(Span::raw(if commentable { " " } else { " " }));
+    spans.push(Span::raw(" "));
 
     spans.push(Span::styled(old_s, Style::default().fg(Color::DarkGray)));
     spans.push(Span::raw(" "));
     spans.push(Span::styled(left_prefix.to_string(), left_prefix_style));
     spans.push(Span::raw(" "));
-    spans.extend(left_spans);
+    spans.extend(left_code);
 
     spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
 
@@ -496,7 +574,7 @@ fn render_side_by_side_line(
     spans.push(Span::raw(" "));
     spans.push(Span::styled(right_prefix.to_string(), right_prefix_style));
     spans.push(Span::raw(" "));
-    spans.extend(right_spans);
+    spans.extend(right_code);
 
     let mut style = Style::default();
     if selected {
@@ -629,13 +707,16 @@ fn draw_comment_editor(f: &mut ratatui::Frame, diff_area: Rect, s: &DrawState<'_
         return;
     };
     let popup_h = 6u16.min(diff_area.height.saturating_sub(2)).max(3);
-    let popup_w = (diff_area.width.saturating_sub(4)).min(90).max(20);
+    let popup_w = (diff_area.width.saturating_sub(4)).clamp(20, 90);
 
     let inner = diff_area.inner(ratatui::layout::Margin {
         horizontal: 1,
         vertical: 1,
     });
-    let rel_y = s.diff_cursor.saturating_sub(s.diff_scroll as usize) as u16;
+    let rel_y = s
+        .diff_cursor_visual
+        .saturating_sub(s.diff_scroll as u32)
+        .min(u16::MAX as u32) as u16;
     let cursor_y = inner.y.saturating_add(rel_y);
 
     let mut y = cursor_y.saturating_add(1);

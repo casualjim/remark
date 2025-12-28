@@ -110,7 +110,7 @@ pub fn list_staged_paths(repo: &Repository) -> Result<Vec<String>> {
     let mut out = BTreeSet::<String>::new();
     repo.tree_index_status(
         &head_tree_id,
-        &*index,
+        &index,
         None,
         gix::status::tree_index::TrackRenames::Disabled,
         |change, _, _| {

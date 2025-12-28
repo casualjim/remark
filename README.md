@@ -74,12 +74,28 @@ remark prompt
 Options:
 
 ```bash
-remark prompt --view all
-remark prompt --view staged
-remark prompt --view unstaged
-remark prompt --view base --base refs/heads/main
+remark prompt --filter all
+remark prompt --filter staged
+remark prompt --filter unstaged
+remark prompt --filter base --base refs/heads/main
 remark prompt --ref refs/notes/remark
 remark prompt --copy
+```
+
+### Resolve a comment without the UI
+
+```bash
+# Resolve a file-level comment
+remark resolve --file src/lib.rs --file-comment
+
+# Resolve a line comment (default side is "new")
+remark resolve --file src/lib.rs --line 42
+
+# Resolve an "old" (deleted) line comment
+remark resolve --file src/lib.rs --line 10 --side old
+
+# Mark a comment as unresolved again
+remark resolve --file src/lib.rs --line 42 --unresolve
 ```
 
 ## Keybindings

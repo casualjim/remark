@@ -254,10 +254,10 @@ pub fn decode_file_note(note: &str) -> Option<FileReview> {
                 json_lines.push(l);
             }
             let json = json_lines.join("\n");
-            if let Ok(v) = serde_json::from_str::<FileNote>(&json) {
-                if v.version == 2 {
-                    return Some(v.file);
-                }
+            if let Ok(v) = serde_json::from_str::<FileNote>(&json)
+                && v.version == 2
+            {
+                return Some(v.file);
             }
 
             #[derive(Debug, Clone, Deserialize)]
@@ -277,26 +277,26 @@ pub fn decode_file_note(note: &str) -> Option<FileReview> {
             if v1.version != 1 {
                 return None;
             }
-            let mut out = FileReview::default();
-            out.file_comment = v1.file.file_comment.map(|body| Comment {
-                body,
-                resolved: false,
+            return Some(FileReview {
+                file_comment: v1.file.file_comment.map(|body| Comment {
+                    body,
+                    resolved: false,
+                }),
+                comments: v1
+                    .file
+                    .comments
+                    .into_iter()
+                    .map(|(k, body)| {
+                        (
+                            k,
+                            Comment {
+                                body,
+                                resolved: false,
+                            },
+                        )
+                    })
+                    .collect(),
             });
-            out.comments = v1
-                .file
-                .comments
-                .into_iter()
-                .map(|(k, body)| {
-                    (
-                        k,
-                        Comment {
-                            body,
-                            resolved: false,
-                        },
-                    )
-                })
-                .collect();
-            return Some(out);
         }
     }
     None
