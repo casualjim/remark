@@ -1,8 +1,8 @@
 use std::io::{Stdout, stdout};
 
 use anyhow::{Context, Result};
-use crossterm::execute;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -18,7 +18,7 @@ use crate::app::{
     Mode, RenderRow, SideBySideRow,
 };
 use crate::git::ViewKind;
-use crate::review::Review;
+use crate::review::{CommentState, Review};
 
 pub struct Ui {
     pub terminal: Terminal<CrosstermBackend<Stdout>>,
@@ -144,12 +144,16 @@ fn draw_files(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
             FileChangeKind::Deleted => ("D", Color::Red),
             FileChangeKind::Modified => ("M", Color::Yellow),
         };
-        let has_any = s.review.has_any_comments(&e.path);
-        let cm = if has_any { "💬" } else { " " };
+        let state = s.review.comment_state(&e.path);
+        let (cm, cm_color) = match state {
+            CommentState::HasUnresolved => ("💬", Color::Yellow),
+            CommentState::ResolvedOnly => ("✓", Color::Green),
+            CommentState::None => (" ", Color::DarkGray),
+        };
         items.push(ListItem::new(Line::from(vec![
             Span::styled(format!("{st} "), Style::default().fg(st_color)),
             Span::styled(format!("{tag} "), Style::default().fg(color)),
-            Span::styled(format!("{cm} "), Style::default().fg(if has_any { Color::Yellow } else { Color::DarkGray })),
+            Span::styled(format!("{cm} "), Style::default().fg(cm_color)),
             Span::raw(e.path.clone()),
         ])));
     }
@@ -174,13 +178,10 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
     } else {
         s.files
             .get(s.file_selected)
-            .map(|e| {
-                let has_file = s
-                    .review
-                    .file_comment(&e.path)
-                    .map(|c| !c.trim().is_empty())
-                    .unwrap_or(false);
-                format!("Diff — {}{}", e.path, if has_file { " 💬" } else { "" })
+            .map(|e| match s.review.comment_state(&e.path) {
+                CommentState::HasUnresolved => format!("Diff — {} 💬", e.path),
+                CommentState::ResolvedOnly => format!("Diff — {} ✓", e.path),
+                CommentState::None => format!("Diff — {}", e.path),
             })
             .unwrap_or_else(|| "Diff".to_string())
     };
@@ -234,12 +235,16 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
         let locator = match (row, path) {
             (RenderRow::FileHeader { .. }, Some(_)) => Some(CommentLocator::File),
             (RenderRow::Unified(r), Some(_)) => match r.kind {
-                crate::diff::Kind::Remove => r
-                    .old_line
-                    .map(|line| CommentLocator::Line { side: crate::review::LineSide::Old, line }),
-                crate::diff::Kind::Add | crate::diff::Kind::Context => r
-                    .new_line
-                    .map(|line| CommentLocator::Line { side: crate::review::LineSide::New, line }),
+                crate::diff::Kind::Remove => r.old_line.map(|line| CommentLocator::Line {
+                    side: crate::review::LineSide::Old,
+                    line,
+                }),
+                crate::diff::Kind::Add | crate::diff::Kind::Context => {
+                    r.new_line.map(|line| CommentLocator::Line {
+                        side: crate::review::LineSide::New,
+                        line,
+                    })
+                }
                 _ => None,
             },
             (RenderRow::SideBySide(r), Some(_)) => {
@@ -264,32 +269,43 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
         };
 
         let commentable = locator.is_some();
-        let has_comment = match (path, locator) {
-            (Some(p), Some(CommentLocator::File)) => s
-                .review
-                .file_comment(p)
-                .map(|c| !c.trim().is_empty())
-                .unwrap_or(false),
-            (Some(p), Some(CommentLocator::Line { side, line })) => s
-                .review
-                .line_comment(p, side, line)
-                .map(|c| !c.trim().is_empty())
-                .unwrap_or(false),
-            _ => false,
+        let marker_state = match (path, locator) {
+            (Some(p), Some(CommentLocator::File)) => s.review.file_comment(p).and_then(|c| {
+                if c.body.trim().is_empty() {
+                    None
+                } else if c.resolved {
+                    Some(CommentState::ResolvedOnly)
+                } else {
+                    Some(CommentState::HasUnresolved)
+                }
+            }),
+            (Some(p), Some(CommentLocator::Line { side, line })) => {
+                s.review.line_comment(p, side, line).and_then(|c| {
+                    if c.body.trim().is_empty() {
+                        None
+                    } else if c.resolved {
+                        Some(CommentState::ResolvedOnly)
+                    } else {
+                        Some(CommentState::HasUnresolved)
+                    }
+                })
+            }
+            _ => None,
         };
 
         match row {
             RenderRow::FileHeader { path } => {
                 // Keep this gutter column a fixed width (emoji are often 2 cells).
-                let marker = if has_comment { "💬" } else { "  " };
+                let (marker, marker_style) = match marker_state {
+                    Some(CommentState::HasUnresolved) => ("💬", Style::default().fg(Color::Yellow)),
+                    Some(CommentState::ResolvedOnly) => ("✓ ", Style::default().fg(Color::Green)),
+                    _ => ("  ", Style::default().fg(Color::Reset)),
+                };
                 let old_s = " ".repeat(old_w);
                 let new_s = " ".repeat(new_w);
 
                 let mut spans: Vec<Span<'static>> = Vec::with_capacity(8);
-                spans.push(Span::styled(
-                    marker.to_string(),
-                    Style::default().fg(if has_comment { Color::Yellow } else { Color::Reset }),
-                ));
+                spans.push(Span::styled(marker.to_string(), marker_style));
                 spans.push(Span::raw(" "));
                 spans.push(Span::raw(" "));
                 spans.push(Span::styled(old_s, Style::default().fg(Color::DarkGray)));
@@ -298,7 +314,9 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
                 spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
                 spans.push(Span::styled(
                     path.clone(),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 ));
 
                 let mut style = Style::default().bg(Color::Rgb(25, 25, 25));
@@ -325,7 +343,11 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
             }
             RenderRow::Unified(r) => {
                 // Keep this gutter column a fixed width (emoji are often 2 cells).
-                let marker = if has_comment { "💬" } else { "  " };
+                let (marker, marker_style) = match marker_state {
+                    Some(CommentState::HasUnresolved) => ("💬", Style::default().fg(Color::Yellow)),
+                    Some(CommentState::ResolvedOnly) => ("✓ ", Style::default().fg(Color::Green)),
+                    _ => ("  ", Style::default().fg(Color::Reset)),
+                };
                 let diff_prefix = match r.kind {
                     crate::diff::Kind::Add => '+',
                     crate::diff::Kind::Remove => '-',
@@ -347,10 +369,7 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
                     .unwrap_or_else(|| " ".repeat(new_w));
 
                 let mut spans: Vec<Span<'static>> = Vec::with_capacity(10 + r.spans.len());
-                spans.push(Span::styled(
-                    marker.to_string(),
-                    Style::default().fg(if has_comment { Color::Yellow } else { Color::Reset }),
-                ));
+                spans.push(Span::styled(marker.to_string(), marker_style));
                 spans.push(Span::styled(diff_prefix.to_string(), diff_prefix_style));
                 spans.push(Span::raw(if commentable { " " } else { " " }));
                 spans.push(Span::styled(old_s, Style::default().fg(Color::DarkGray)));
@@ -376,7 +395,11 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
                     r,
                     abs_idx == s.diff_cursor,
                     commentable,
-                    has_comment,
+                    matches!(
+                        marker_state,
+                        Some(CommentState::HasUnresolved | CommentState::ResolvedOnly)
+                    ),
+                    matches!(marker_state, Some(CommentState::ResolvedOnly)),
                     old_w,
                     new_w,
                     is_new_file,
@@ -395,6 +418,7 @@ fn render_side_by_side_line(
     selected: bool,
     commentable: bool,
     has_comment: bool,
+    comment_resolved: bool,
     old_w: usize,
     new_w: usize,
     is_new_file: bool,
@@ -407,7 +431,13 @@ fn render_side_by_side_line(
             .collect()
     }
 
-    let marker = if has_comment { "💬" } else { "  " };
+    let (marker, marker_style) = if has_comment && comment_resolved {
+        ("✓ ", Style::default().fg(Color::Green))
+    } else if has_comment {
+        ("💬", Style::default().fg(Color::Yellow))
+    } else {
+        ("  ", Style::default().fg(Color::Reset))
+    };
 
     let old_s = row
         .old_line
@@ -449,11 +479,9 @@ fn render_side_by_side_line(
         right_spans = tint(&right_spans, Color::Rgb(0, 50, 0));
     }
 
-    let mut spans: Vec<Span<'static>> = Vec::with_capacity(12 + left_spans.len() + right_spans.len());
-    spans.push(Span::styled(
-        marker.to_string(),
-        Style::default().fg(if has_comment { Color::Yellow } else { Color::Reset }),
-    ));
+    let mut spans: Vec<Span<'static>> =
+        Vec::with_capacity(12 + left_spans.len() + right_spans.len());
+    spans.push(Span::styled(marker.to_string(), marker_style));
     spans.push(Span::raw(if commentable { " " } else { " " }));
 
     spans.push(Span::styled(old_s, Style::default().fg(Color::DarkGray)));
@@ -486,43 +514,18 @@ fn draw_footer(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
         (ViewKind::Base, None) => "base(unset)".to_string(),
     };
 
-    let focus = match s.focus {
-        Focus::Files => "files",
-        Focus::Diff => "diff",
-    };
-
     let diff_mode = match s.diff_view_mode {
         DiffViewMode::Unified => "unified",
         DiffViewMode::SideBySide => "side-by-side",
     };
 
-    let show_copy = s.show_prompt && s.mode == Mode::Browse;
-
     let mut left = match s.mode {
         Mode::Browse => {
-            // Keep this single-line footer readable on narrow terminals by progressively compacting.
-            let wide = format!(
-                "focus={}  view={}  diff={}  Tab  1/2/3/4 views  i mode  ↑/↓ PgUp/PgDn  c comment  d delete  Ctrl+S save  p prompt{}  ? help  q quit",
-                focus,
-                view_label,
-                diff_mode,
-                if show_copy { "  y copy" } else { "" }
-            );
-            let mid = format!(
-                "view={} diff={}  Tab  1-4 views  i mode  ↑/↓ PgUp/PgDn  c comment  Ctrl+S save  ? help  q quit",
-                view_label, diff_mode
-            );
-            let narrow =
-                "Tab focus  1-4 view  i mode  c comment  ? help  q quit".to_string();
-
-            let w = area.width as usize;
-            if wide.chars().count() <= w {
-                wide
-            } else if mid.chars().count() <= w {
-                mid
-            } else {
-                fit_with_ellipsis(&narrow, w)
-            }
+            // Intentionally minimal: rely on `?` for keybinding help.
+            fit_with_ellipsis(
+                &format!("view={view_label} diff={diff_mode}"),
+                area.width as usize,
+            )
         }
         Mode::EditComment => {
             let s = "comment editor  (F2 accept)  (Esc cancel)".to_string();
@@ -585,9 +588,10 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect) {
         Line::from("  i                 Toggle unified / side-by-side"),
         Line::from("  c                 Add/edit comment (file or line)"),
         Line::from("  d                 Delete comment (file or line)"),
+        Line::from("  r                 Resolve/unresolve comment"),
         Line::from(""),
         Line::from("Review"),
-        Line::from("  Ctrl+S            Save review note"),
+        Line::from("  Ctrl+S            Save review notes"),
         Line::from("  p                Toggle prompt preview"),
         Line::from("  y                Copy prompt to clipboard (when open)"),
         Line::from("  q / Q            Quit"),
@@ -595,6 +599,9 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect) {
         Line::from("Comment editor"),
         Line::from("  F2 / Alt+Enter    Accept and move on"),
         Line::from("  Esc               Cancel"),
+        Line::from(""),
+        Line::from("Help"),
+        Line::from("  ? or Esc          Close this help"),
     ]);
 
     let popup = centered_rect(78, 80, area);
@@ -607,7 +614,9 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect) {
 fn draw_prompt(f: &mut ratatui::Frame, area: Rect, prompt: &str) {
     let popup = centered_rect(82, 82, area);
     f.render_widget(Clear, popup);
-    let block = Block::default().borders(Borders::ALL).title("LLM Prompt Preview (from note)");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("LLM Prompt Preview (collated)");
     let para = Paragraph::new(Text::raw(prompt))
         .block(block)
         .wrap(Wrap { trim: false })
@@ -616,11 +625,16 @@ fn draw_prompt(f: &mut ratatui::Frame, area: Rect, prompt: &str) {
 }
 
 fn draw_comment_editor(f: &mut ratatui::Frame, diff_area: Rect, s: &DrawState<'_>) {
-    let Some(target) = s.editor_target else { return };
+    let Some(target) = s.editor_target else {
+        return;
+    };
     let popup_h = 6u16.min(diff_area.height.saturating_sub(2)).max(3);
     let popup_w = (diff_area.width.saturating_sub(4)).min(90).max(20);
 
-    let inner = diff_area.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+    let inner = diff_area.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
     let rel_y = s.diff_cursor.saturating_sub(s.diff_scroll as usize) as u16;
     let cursor_y = inner.y.saturating_add(rel_y);
 

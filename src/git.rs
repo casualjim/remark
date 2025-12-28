@@ -35,9 +35,22 @@ pub fn default_base_ref(repo: &Repository) -> Option<String> {
         })
 }
 
-pub fn note_key_oid(repo: &Repository, kind: ViewKind, base_ref: Option<&str>) -> Result<ObjectId> {
+pub fn head_commit_oid(repo: &Repository) -> Result<ObjectId> {
+    Ok(repo.head_commit().context("read HEAD commit")?.id)
+}
+
+pub fn note_file_key_oid(
+    repo: &Repository,
+    head_commit: ObjectId,
+    kind: ViewKind,
+    base_ref: Option<&str>,
+    path: &str,
+) -> Result<ObjectId> {
     let mut key = String::new();
-    key.push_str("remark-key:v1\n");
+    key.push_str("remark-file-key:v1\n");
+    key.push_str("head:");
+    key.push_str(&head_commit.to_string());
+    key.push('\n');
     key.push_str("kind:");
     key.push_str(match kind {
         ViewKind::All => "all",
@@ -51,8 +64,12 @@ pub fn note_key_oid(repo: &Repository, kind: ViewKind, base_ref: Option<&str>) -
         key.push_str(b);
         key.push('\n');
     }
+    key.push_str("path:");
+    key.push_str(path);
+    key.push('\n');
+
     let oid = gix_object::compute_hash(repo.object_hash(), gix_object::Kind::Blob, key.as_bytes())
-        .context("compute note key oid")?;
+        .context("compute file note key oid")?;
     Ok(oid)
 }
 
@@ -177,7 +194,9 @@ pub fn try_read_index(repo: &Repository, path: &str) -> Result<Option<String>> {
         .context("find index blob")?
         .try_into_blob()
         .context("index entry is not a blob")?;
-    Ok(Some(String::from_utf8_lossy(blob.data.as_ref()).to_string()))
+    Ok(Some(
+        String::from_utf8_lossy(blob.data.as_ref()).to_string(),
+    ))
 }
 
 pub fn try_read_head(repo: &Repository, path: &str) -> Result<Option<String>> {
@@ -193,7 +212,9 @@ pub fn try_read_head(repo: &Repository, path: &str) -> Result<Option<String>> {
         .context("load tree entry")?
         .try_into_blob()
         .context("tree entry is not a blob")?;
-    Ok(Some(String::from_utf8_lossy(blob.data.as_ref()).to_string()))
+    Ok(Some(
+        String::from_utf8_lossy(blob.data.as_ref()).to_string(),
+    ))
 }
 
 pub fn try_read_tree(tree: &gix::Tree<'_>, path: &str) -> Result<Option<String>> {
@@ -208,5 +229,7 @@ pub fn try_read_tree(tree: &gix::Tree<'_>, path: &str) -> Result<Option<String>>
         .context("load tree entry")?
         .try_into_blob()
         .context("tree entry is not a blob")?;
-    Ok(Some(String::from_utf8_lossy(blob.data.as_ref()).to_string()))
+    Ok(Some(
+        String::from_utf8_lossy(blob.data.as_ref()).to_string(),
+    ))
 }

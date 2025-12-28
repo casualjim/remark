@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 
 use crate::git::ViewKind;
+use crate::review::Review;
 
 const DEFAULT_NOTES_REF: &str = "refs/notes/remark";
 
@@ -48,40 +49,58 @@ pub fn run() -> Result<()> {
         }
     }
 
-    let (oid, kind, base_for_review) = match view {
-        ViewKind::All => (
-            crate::git::note_key_oid(&repo, ViewKind::All, None)?,
-            "all".to_string(),
-            None,
-        ),
+    let head = crate::git::head_commit_oid(&repo)?;
+
+    let (kind, base_for_review, base_for_key, mut paths) = match view {
+        ViewKind::All => {
+            let mut staged = crate::git::list_staged_paths(&repo)?;
+            staged.extend(crate::git::list_unstaged_paths(&repo)?);
+            ("all".to_string(), None, None, staged)
+        }
         ViewKind::Unstaged => (
-            crate::git::note_key_oid(&repo, ViewKind::Unstaged, None)?,
             "unstaged".to_string(),
             None,
+            None,
+            crate::git::list_unstaged_paths(&repo)?,
         ),
         ViewKind::Staged => (
-            crate::git::note_key_oid(&repo, ViewKind::Staged, None)?,
             "staged".to_string(),
             None,
+            None,
+            crate::git::list_staged_paths(&repo)?,
         ),
         ViewKind::Base => {
             let Some(base) = base_ref.clone() else {
                 anyhow::bail!("base view requires --base <ref> (or an upstream/main/master)")
             };
             (
-                crate::git::note_key_oid(&repo, ViewKind::Base, Some(&base))?,
                 "base".to_string(),
-                Some(base),
+                Some(base.clone()),
+                Some(base.clone()),
+                crate::git::list_base_paths(&repo, &base)?,
             )
         }
     };
 
-    let note = crate::notes::read(&repo, &notes_ref, &oid).context("read review note")?;
+    paths.sort();
+    paths.dedup();
 
-    let review = note
-        .as_deref()
-        .and_then(crate::review::decode_note)
-        .unwrap_or_else(|| crate::review::Review::new(kind, base_for_review));
+    let mut review = Review::new(kind, base_for_review);
+    for path in paths {
+        let oid = crate::git::note_file_key_oid(&repo, head, view, base_for_key.as_deref(), &path)
+            .with_context(|| format!("compute note key for '{path}'"))?;
+        let note = crate::notes::read(&repo, &notes_ref, &oid)
+            .with_context(|| format!("read note for '{path}'"))?;
+        let Some(note) = note.as_deref() else {
+            continue;
+        };
+        let Some(file) = crate::review::decode_file_note(note) else {
+            continue;
+        };
+        if file.file_comment.is_some() || !file.comments.is_empty() {
+            review.files.insert(path, file);
+        }
+    }
 
     let prompt = crate::review::render_prompt(&review);
     if copy {
@@ -98,7 +117,7 @@ pub fn run() -> Result<()> {
 
 fn print_help_and_exit() -> ! {
     eprintln!(
-        "remark prompt\n\nUSAGE:\n  remark prompt [--view all|unstaged|staged|base] [--base <ref>] [--ref <notes-ref>] [--copy]\n\nOPTIONS:\n  --view <v>          Which review note to render (default: all)\n  --base <ref>        Base ref when --view base (default: @{{upstream}} / main / master)\n  --ref <notes-ref>   Notes ref to read (default: {DEFAULT_NOTES_REF})\n  --copy, -c          Copy prompt to clipboard\n"
+        "remark prompt\n\nUSAGE:\n  remark prompt [--view all|unstaged|staged|base] [--base <ref>] [--ref <notes-ref>] [--copy]\n\nOPTIONS:\n  --view <v>          Which view to render (default: all)\n  --base <ref>        Base ref when --view base (default: @{{upstream}} / main / master)\n  --ref <notes-ref>   Notes ref to read (default: {DEFAULT_NOTES_REF})\n  --copy, -c          Copy prompt to clipboard\n"
     );
     std::process::exit(2);
 }

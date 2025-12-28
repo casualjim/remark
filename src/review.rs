@@ -2,6 +2,13 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Comment {
+    pub body: String,
+    #[serde(default)]
+    pub resolved: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LineSide {
     Old,
@@ -53,9 +60,8 @@ impl<'de> Deserialize<'de> for LineKey {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Review {
-    pub version: u8,
     pub kind: String,
     pub base_ref: Option<String>,
     pub files: BTreeMap<String, FileReview>,
@@ -64,15 +70,21 @@ pub struct Review {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FileReview {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub file_comment: Option<String>,
+    pub file_comment: Option<Comment>,
     #[serde(default)]
-    pub comments: BTreeMap<LineKey, String>,
+    pub comments: BTreeMap<LineKey, Comment>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommentState {
+    None,
+    ResolvedOnly,
+    HasUnresolved,
 }
 
 impl Review {
     pub fn new(kind: impl Into<String>, base_ref: Option<String>) -> Self {
         Self {
-            version: 2,
             kind: kind.into(),
             base_ref,
             files: BTreeMap::new(),
@@ -84,21 +96,25 @@ impl Review {
         if comment.trim().is_empty() {
             f.file_comment = None;
         } else {
-            f.file_comment = Some(comment);
+            let resolved = f.file_comment.as_ref().map(|c| c.resolved).unwrap_or(false);
+            f.file_comment = Some(Comment {
+                body: comment,
+                resolved,
+            });
         }
         if f.file_comment.is_none() && f.comments.is_empty() {
             self.files.remove(path);
         }
     }
 
-    pub fn file_comment(&self, path: &str) -> Option<&str> {
-        self.files
-            .get(path)
-            .and_then(|f| f.file_comment.as_deref())
+    pub fn file_comment(&self, path: &str) -> Option<&Comment> {
+        self.files.get(path).and_then(|f| f.file_comment.as_ref())
     }
 
     pub fn remove_file_comment(&mut self, path: &str) -> bool {
-        let Some(f) = self.files.get_mut(path) else { return false };
+        let Some(f) = self.files.get_mut(path) else {
+            return false;
+        };
         let removed = f.file_comment.take().is_some();
         if f.file_comment.is_none() && f.comments.is_empty() {
             self.files.remove(path);
@@ -106,30 +122,64 @@ impl Review {
         removed
     }
 
-    pub fn set_line_comment(&mut self, path: &str, side: LineSide, line_1_based: u32, comment: String) {
+    pub fn toggle_file_comment_resolved(&mut self, path: &str) -> Option<bool> {
+        let f = self.files.get_mut(path)?;
+        let c = f.file_comment.as_mut()?;
+        c.resolved = !c.resolved;
+        Some(c.resolved)
+    }
+
+    pub fn set_line_comment(
+        &mut self,
+        path: &str,
+        side: LineSide,
+        line_1_based: u32,
+        comment: String,
+    ) {
         let f = self.files.entry(path.to_string()).or_default();
         if comment.trim().is_empty() {
-            f.comments.remove(&LineKey { side, line: line_1_based });
+            f.comments.remove(&LineKey {
+                side,
+                line: line_1_based,
+            });
         } else {
-            f.comments.insert(LineKey { side, line: line_1_based }, comment);
+            let key = LineKey {
+                side,
+                line: line_1_based,
+            };
+            let resolved = f.comments.get(&key).map(|c| c.resolved).unwrap_or(false);
+            f.comments.insert(
+                key,
+                Comment {
+                    body: comment,
+                    resolved,
+                },
+            );
         }
         if f.file_comment.is_none() && f.comments.is_empty() {
             self.files.remove(path);
         }
     }
 
-    pub fn line_comment(&self, path: &str, side: LineSide, line_1_based: u32) -> Option<&str> {
-        self.files
-            .get(path)
-            .and_then(|f| f.comments.get(&LineKey { side, line: line_1_based }))
-            .map(|s| s.as_str())
+    pub fn line_comment(&self, path: &str, side: LineSide, line_1_based: u32) -> Option<&Comment> {
+        self.files.get(path).and_then(|f| {
+            f.comments.get(&LineKey {
+                side,
+                line: line_1_based,
+            })
+        })
     }
 
     pub fn remove_line_comment(&mut self, path: &str, side: LineSide, line_1_based: u32) -> bool {
-        let Some(f) = self.files.get_mut(path) else { return false };
+        let Some(f) = self.files.get_mut(path) else {
+            return false;
+        };
         let removed = f
             .comments
-            .remove(&LineKey { side, line: line_1_based })
+            .remove(&LineKey {
+                side,
+                line: line_1_based,
+            })
             .is_some();
         if f.file_comment.is_none() && f.comments.is_empty() {
             self.files.remove(path);
@@ -137,23 +187,62 @@ impl Review {
         removed
     }
 
-    pub fn has_any_comments(&self, path: &str) -> bool {
-        self.files
-            .get(path)
-            .map(|f| f.file_comment.as_deref().is_some() || !f.comments.is_empty())
-            .unwrap_or(false)
+    pub fn toggle_line_comment_resolved(
+        &mut self,
+        path: &str,
+        side: LineSide,
+        line_1_based: u32,
+    ) -> Option<bool> {
+        let f = self.files.get_mut(path)?;
+        let c = f.comments.get_mut(&LineKey {
+            side,
+            line: line_1_based,
+        })?;
+        c.resolved = !c.resolved;
+        Some(c.resolved)
+    }
+
+    pub fn comment_state(&self, path: &str) -> CommentState {
+        let Some(f) = self.files.get(path) else {
+            return CommentState::None;
+        };
+        let mut saw_any = false;
+        if let Some(c) = f.file_comment.as_ref() {
+            saw_any = true;
+            if !c.resolved {
+                return CommentState::HasUnresolved;
+            }
+        }
+        for c in f.comments.values() {
+            saw_any = true;
+            if !c.resolved {
+                return CommentState::HasUnresolved;
+            }
+        }
+        if saw_any {
+            CommentState::ResolvedOnly
+        } else {
+            CommentState::None
+        }
     }
 }
 
-pub fn encode_note(review: &Review) -> String {
-    let json = serde_json::to_string_pretty(review).unwrap_or_else(|_| "{}".to_string());
-    let prompt = render_prompt(review);
-    format!(
-        "<!-- remark:2 -->\n```json\n{json}\n```\n\n# Review (LLM Prompt)\n\n{prompt}\n"
-    )
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FileNote {
+    version: u8,
+    file: FileReview,
 }
 
-pub fn decode_note(note: &str) -> Option<Review> {
+pub fn encode_file_note(file: &FileReview) -> String {
+    let json = serde_json::to_string_pretty(&FileNote {
+        version: 2,
+        file: file.clone(),
+    })
+    .unwrap_or_else(|_| "{}".to_string());
+    format!("<!-- remark-file:2 -->\n```json\n{json}\n```\n")
+}
+
+pub fn decode_file_note(note: &str) -> Option<FileReview> {
     let mut lines = note.lines();
     while let Some(line) = lines.next() {
         if line.trim() == "```json" {
@@ -165,33 +254,48 @@ pub fn decode_note(note: &str) -> Option<Review> {
                 json_lines.push(l);
             }
             let json = json_lines.join("\n");
-            if let Ok(r) = serde_json::from_str::<Review>(&json) {
-                return Some(r);
+            if let Ok(v) = serde_json::from_str::<FileNote>(&json) {
+                if v.version == 2 {
+                    return Some(v.file);
+                }
             }
 
             #[derive(Debug, Clone, Deserialize)]
-            struct ReviewV1 {
+            struct FileNoteV1 {
                 version: u8,
-                kind: String,
-                base_ref: Option<String>,
-                files: BTreeMap<String, FileReviewV1>,
+                file: FileReviewV1,
             }
             #[derive(Debug, Clone, Default, Deserialize)]
             struct FileReviewV1 {
-                comments: BTreeMap<u32, String>,
+                #[serde(default)]
+                file_comment: Option<String>,
+                #[serde(default)]
+                comments: BTreeMap<LineKey, String>,
             }
 
-            let v1 = serde_json::from_str::<ReviewV1>(&json).ok()?;
+            let v1 = serde_json::from_str::<FileNoteV1>(&json).ok()?;
             if v1.version != 1 {
                 return None;
             }
-
-            let mut out = Review::new(v1.kind, v1.base_ref);
-            for (path, f) in v1.files {
-                for (line, c) in f.comments {
-                    out.set_line_comment(&path, LineSide::New, line, c);
-                }
-            }
+            let mut out = FileReview::default();
+            out.file_comment = v1.file.file_comment.map(|body| Comment {
+                body,
+                resolved: false,
+            });
+            out.comments = v1
+                .file
+                .comments
+                .into_iter()
+                .map(|(k, body)| {
+                    (
+                        k,
+                        Comment {
+                            body,
+                            resolved: false,
+                        },
+                    )
+                })
+                .collect();
             return Some(out);
         }
     }
@@ -210,21 +314,52 @@ pub fn render_prompt(review: &Review) -> String {
         return out;
     }
 
+    let mut todos: Vec<(String, String)> = Vec::new();
+
     for (path, f) in &review.files {
+        let has_unresolved = f
+            .file_comment
+            .as_ref()
+            .map(|c| !c.resolved && !c.body.trim().is_empty())
+            .unwrap_or(false)
+            || f.comments
+                .values()
+                .any(|c| !c.resolved && !c.body.trim().is_empty());
+        if !has_unresolved {
+            continue;
+        }
         out.push_str(&format!("## {path}\n"));
-        if let Some(fc) = f.file_comment.as_deref().map(str::trim_end).filter(|s| !s.is_empty()) {
+        if let Some(fc) = f
+            .file_comment
+            .as_ref()
+            .filter(|c| !c.resolved)
+            .map(|c| c.body.trim_end())
+            .filter(|s| !s.is_empty())
+        {
             out.push_str(&format!("- File: {fc}\n"));
+            todos.push((path.clone(), fc.to_string()));
         }
         for (line, comment) in &f.comments {
-            let comment = comment.trim_end();
+            if comment.resolved {
+                continue;
+            }
+            let comment = comment.body.trim_end();
+            if comment.is_empty() {
+                continue;
+            }
             let side = match line.side {
                 LineSide::Old => "old",
                 LineSide::New => "new",
             };
-            out.push_str(&format!(
-                "- Line {} ({side}): {comment}\n",
-                line.line
-            ));
+            out.push_str(&format!("- Line {} ({side}): {comment}\n", line.line));
+        }
+        out.push('\n');
+    }
+
+    if !todos.is_empty() {
+        out.push_str("## TODOs\n");
+        for (path, c) in todos {
+            out.push_str(&format!("- {path}: {c}\n"));
         }
         out.push('\n');
     }

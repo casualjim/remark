@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
+use gix_diff::blob::intern::InternedInput;
 use gix_diff::blob::unified_diff::{ConsumeHunk, ContextSize, DiffLineKind, HunkHeader};
 use gix_diff::blob::{Algorithm, UnifiedDiff};
-use gix_diff::blob::intern::InternedInput;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -46,8 +46,8 @@ pub fn unified_file_diff(
 
     let input = InternedInput::new(before_s.as_bytes(), after_s.as_bytes());
     let sink = UnifiedDiff::new(&input, CollectUnified::new(), ContextSize::symmetrical(3));
-    let collected = gix_diff::blob::diff(Algorithm::Histogram, &input, sink)
-        .context("render unified diff")?;
+    let collected =
+        gix_diff::blob::diff(Algorithm::Histogram, &input, sink).context("render unified diff")?;
     out.extend(collected.lines);
     Ok(out)
 }
@@ -66,7 +66,11 @@ impl CollectUnified {
 impl ConsumeHunk for CollectUnified {
     type Out = CollectUnified;
 
-    fn consume_hunk(&mut self, header: HunkHeader, lines: &[(DiffLineKind, &[u8])]) -> std::io::Result<()> {
+    fn consume_hunk(
+        &mut self,
+        header: HunkHeader,
+        lines: &[(DiffLineKind, &[u8])],
+    ) -> std::io::Result<()> {
         let hint = lines
             .iter()
             .filter_map(|(k, bytes)| {
@@ -118,7 +122,9 @@ impl ConsumeHunk for CollectUnified {
         let mut new_line = header.after_hunk_start;
 
         for (kind, bytes) in lines {
-            let txt = String::from_utf8_lossy(bytes).trim_end_matches(['\n', '\r']).to_string();
+            let txt = String::from_utf8_lossy(bytes)
+                .trim_end_matches(['\n', '\r'])
+                .to_string();
             match kind {
                 DiffLineKind::Context => {
                     self.lines.push(Line {

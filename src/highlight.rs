@@ -2,9 +2,9 @@ use anyhow::{Context, Result};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 
+use syntastica::language_set::SupportedLanguage;
 use syntastica::style::Style as SynStyle;
 use syntastica::theme::ResolvedTheme;
-use syntastica::language_set::SupportedLanguage;
 use syntastica_parsers::{Lang, LanguageSetImpl};
 
 pub struct Highlighter {
@@ -44,7 +44,11 @@ impl Highlighter {
         self.highlight_lang(Lang::Diff, text)
     }
 
-    pub fn detect_file_lang(&self, repo: &gix::Repository, repo_relative_path: &str) -> Option<Lang> {
+    pub fn detect_file_lang(
+        &self,
+        repo: &gix::Repository,
+        repo_relative_path: &str,
+    ) -> Option<Lang> {
         if let Some(wt) = repo.workdir() {
             let abs = wt.join(repo_relative_path);
             if abs.is_file() {
