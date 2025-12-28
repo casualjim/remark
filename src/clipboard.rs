@@ -12,8 +12,8 @@ pub fn copy(text: &str) -> Result<&'static str> {
 
 fn copy_desktop(text: &str) -> Result<&'static str> {
     use copypasta::{ClipboardContext, ClipboardProvider};
-    let mut ctx = ClipboardContext::new()
-        .map_err(|e| anyhow::anyhow!("init clipboard context: {e}"))?;
+    let mut ctx =
+        ClipboardContext::new().map_err(|e| anyhow::anyhow!("init clipboard context: {e}"))?;
     ctx.set_contents(text.to_string())
         .map_err(|e| anyhow::anyhow!("set clipboard contents: {e}"))?;
     Ok("desktop")

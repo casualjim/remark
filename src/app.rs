@@ -43,13 +43,16 @@ impl Config {
             }
         }
 
-        Self { notes_ref, base_ref }
+        Self {
+            notes_ref,
+            base_ref,
+        }
     }
 }
 
 fn print_help_and_exit() -> ! {
     eprintln!(
-        "remark\n\nUSAGE:\n  remark [--ref <notes-ref>] [--base <ref>]\n\nOPTIONS:\n  --ref <notes-ref>   Notes ref to store reviews (default: {DEFAULT_NOTES_REF})\n  --base <ref>        Base ref for base view (default: @{{upstream}} / main / master)\n\nKEYS (browse):\n  Tab / Shift+Tab     focus files/diff\n  1/2/3/4             all/unstaged/staged/base\n  i                   toggle unified/side-by-side diff\n  Up/Down             navigate (focused pane)\n  PgUp/PgDn           scroll (focused pane)\n  Enter               focus diff (from files)\n  c                   add/edit comment (file or line)\n  d                   delete comment (file or line)\n  Ctrl+S              save review note\n  p                   preview collated prompt\n  y                   copy prompt to clipboard (when open)\n  ?                   help\n  q / Q               quit\n\nKEYS (comment editor):\n  Enter               newline\n  F2 / Alt+Enter      accept comment and move on\n  Esc                 cancel\n"
+        "remark\n\nUSAGE:\n  remark [--ref <notes-ref>] [--base <ref>]\n\nOPTIONS:\n  --ref <notes-ref>   Notes ref to store reviews (default: {DEFAULT_NOTES_REF})\n  --base <ref>        Base ref for base view (default: @{{upstream}} / main / master)\n\nKEYS (browse):\n  Tab / Shift+Tab     focus files/diff\n  1/2/3/4             all/unstaged/staged/base\n  i                   toggle unified/side-by-side diff\n  Up/Down             navigate (focused pane)\n  PgUp/PgDn           scroll (focused pane)\n  Enter               focus diff (from files)\n  c                   add/edit comment (file or line)\n  d                   delete comment (file or line)\n  r                   resolve/unresolve comment\n  Ctrl+S              save review notes\n  p                   preview collated prompt\n  y                   copy prompt to clipboard (when open)\n  ?                   help\n  q / Q               quit\n\nKEYS (comment editor):\n  Enter               newline\n  F2 / Alt+Enter      accept comment and move on\n  Esc                 cancel\n"
     );
     std::process::exit(2);
 }
@@ -134,7 +137,7 @@ struct App {
     mode: Mode,
     diff_view_mode: DiffViewMode,
 
-    review_oid: Option<ObjectId>,
+    head_commit_oid: Option<ObjectId>,
     review: Review,
     review_dirty: bool,
 
@@ -191,7 +194,7 @@ impl App {
             focus: Focus::Files,
             mode: Mode::Browse,
             diff_view_mode: DiffViewMode::Unified,
-            review_oid: None,
+            head_commit_oid: None,
             review: Review::new("all", None),
             review_dirty: false,
             files: Vec::new(),
@@ -237,7 +240,7 @@ impl App {
                 .draw(|f| {
                     crate::ui::draw(
                         f,
-                    crate::ui::DrawState {
+                        crate::ui::DrawState {
                             view: self.view,
                             base_ref: self.base_ref.as_deref(),
                             focus: self.focus,
@@ -301,6 +304,19 @@ impl App {
             }
         }
 
+        if self.show_help {
+            // While help is open, treat most keys as inert.
+            if key.code == KeyCode::Esc {
+                self.show_help = false;
+            } else if key.code == KeyCode::Char('?')
+                && !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT)
+            {
+                self.show_help = false;
+            }
+            return Ok(false);
+        }
+
         if key.code == KeyCode::Char('?')
             && !key.modifiers.contains(KeyModifiers::CONTROL)
             && !key.modifiers.contains(KeyModifiers::ALT)
@@ -344,10 +360,7 @@ impl App {
     }
 
     fn handle_files_key(&mut self, key: KeyEvent) -> Result<()> {
-        let page = self
-            .files_viewport_height
-            .saturating_sub(1)
-            .max(1) as i32;
+        let page = self.files_viewport_height.saturating_sub(1).max(1) as i32;
         match key.code {
             KeyCode::Up => self.select_file(-1)?,
             KeyCode::Down => self.select_file(1)?,
@@ -362,10 +375,7 @@ impl App {
     }
 
     fn handle_diff_key(&mut self, key: KeyEvent) -> Result<()> {
-        let page = self
-            .diff_viewport_height
-            .saturating_sub(1)
-            .max(1) as i32;
+        let page = self.diff_viewport_height.saturating_sub(1).max(1) as i32;
         match key.code {
             KeyCode::Up => self.move_diff_cursor(-1),
             KeyCode::Down => self.move_diff_cursor(1),
@@ -373,7 +383,38 @@ impl App {
             KeyCode::PageDown => self.move_diff_cursor(page),
             KeyCode::Char('c') => self.begin_comment()?,
             KeyCode::Char('d') => self.delete_comment()?,
+            KeyCode::Char('r') => self.toggle_resolved()?,
             _ => {}
+        }
+        Ok(())
+    }
+
+    fn toggle_resolved(&mut self) -> Result<()> {
+        let Some(target) = self.current_comment_target() else {
+            self.status = "Not a commentable target".to_string();
+            return Ok(());
+        };
+
+        let new_state = match target.locator {
+            CommentLocator::File => self.review.toggle_file_comment_resolved(&target.path),
+            CommentLocator::Line { side, line } => {
+                self.review
+                    .toggle_line_comment_resolved(&target.path, side, line)
+            }
+        };
+
+        match new_state {
+            Some(true) => {
+                self.review_dirty = true;
+                self.status = "Resolved".to_string();
+            }
+            Some(false) => {
+                self.review_dirty = true;
+                self.status = "Unresolved".to_string();
+            }
+            None => {
+                self.status = "No comment here".to_string();
+            }
         }
         Ok(())
     }
@@ -494,62 +535,87 @@ impl App {
         self.editor_target = None;
         self.editor_buffer = crate::ui::NoteBuffer::new();
 
-        let (review_oid, review) = self.load_review_for_view()?;
-        self.review_oid = review_oid;
-        self.review = review;
-        self.review_dirty = false;
+        if self.view == ViewKind::Base {
+            let base = self
+                .base_ref
+                .clone()
+                .or_else(|| crate::git::default_base_ref(&self.repo));
+            self.base_ref = base;
+            if self.base_ref.is_none() {
+                self.status = "No base ref set (pass --base <ref>)".to_string();
+            }
+        }
+
+        self.head_commit_oid = crate::git::head_commit_oid(&self.repo).ok();
 
         self.files = self.list_files_for_view()?;
+        if self.view == ViewKind::Base && self.base_ref.is_none() {
+            self.diff_rows.clear();
+            self.review = Review::new(self.view_kind_string(), None);
+            self.review.files.clear();
+            self.review_dirty = false;
+            return Ok(());
+        }
         if self.files.is_empty() {
             self.diff_rows.clear();
             self.status = "No changes".to_string();
+            self.review = Review::new(self.view_kind_string(), self.base_ref_for_review());
+            self.review.files.clear();
+            self.review_dirty = false;
             return Ok(());
+        }
+
+        // Build an in-memory review by loading per-file notes for the current HEAD commit + view.
+        self.review = Review::new(self.view_kind_string(), self.base_ref_for_review());
+        self.review.files.clear();
+        self.review_dirty = false;
+        if let Some(head) = self.head_commit_oid {
+            let base_for_key = self.base_ref_for_key().map(|s| s.to_string());
+            for e in &self.files {
+                let oid = crate::git::note_file_key_oid(
+                    &self.repo,
+                    head,
+                    self.view,
+                    base_for_key.as_deref(),
+                    &e.path,
+                )?;
+                let note = crate::notes::read(&self.repo, &self.notes_ref, &oid)
+                    .with_context(|| format!("read file note for '{}'", e.path))?;
+                if let Some(text) = note.as_deref() {
+                    if let Some(fr) = crate::review::decode_file_note(text) {
+                        self.review.files.insert(e.path.clone(), fr);
+                    }
+                }
+            }
+        } else {
+            self.status = "No HEAD commit (unborn branch) — notes disabled".to_string();
         }
 
         self.reload_diff_for_selected()?;
         Ok(())
     }
 
-    fn load_review_for_view(&mut self) -> Result<(Option<ObjectId>, Review)> {
-        let (new_oid, kind, base_ref) = match self.view {
-            ViewKind::All => {
-                let oid = crate::git::note_key_oid(&self.repo, ViewKind::All, None)?;
-                (Some(oid), "all".to_string(), None)
-            }
-            ViewKind::Unstaged => {
-                let oid = crate::git::note_key_oid(&self.repo, ViewKind::Unstaged, None)?;
-                (Some(oid), "unstaged".to_string(), None)
-            }
-            ViewKind::Staged => {
-                let oid = crate::git::note_key_oid(&self.repo, ViewKind::Staged, None)?;
-                (Some(oid), "staged".to_string(), None)
-            }
-            ViewKind::Base => {
-                let base = self
-                    .base_ref
-                    .clone()
-                    .or_else(|| crate::git::default_base_ref(&self.repo));
-                self.base_ref = base.clone();
-                let Some(base) = base else {
-                    self.status = "No base ref set (pass --base <ref>)".to_string();
-                    return Ok((None, Review::new("base", None)));
-                };
-                let oid = crate::git::note_key_oid(&self.repo, ViewKind::Base, Some(&base))?;
-                (Some(oid), "base".to_string(), Some(base))
-            }
-        };
+    fn view_kind_string(&self) -> &'static str {
+        match self.view {
+            ViewKind::All => "all",
+            ViewKind::Unstaged => "unstaged",
+            ViewKind::Staged => "staged",
+            ViewKind::Base => "base",
+        }
+    }
 
-        let Some(oid) = new_oid else {
-            return Ok((None, Review::new(kind, base_ref)));
-        };
+    fn base_ref_for_key(&self) -> Option<&str> {
+        match self.view {
+            ViewKind::Base => self.base_ref.as_deref(),
+            _ => None,
+        }
+    }
 
-        let note = crate::notes::read(&self.repo, &self.notes_ref, &oid)
-            .context("read review note")?;
-        let review = note
-            .as_deref()
-            .and_then(crate::review::decode_note)
-            .unwrap_or_else(|| Review::new(kind, base_ref));
-        Ok((Some(oid), review))
+    fn base_ref_for_review(&self) -> Option<String> {
+        match self.view {
+            ViewKind::Base => self.base_ref.clone(),
+            _ => None,
+        }
     }
 
     fn list_files_for_view(&self) -> Result<Vec<FileEntry>> {
@@ -558,7 +624,8 @@ impl App {
                 let staged = crate::git::list_staged_paths(&self.repo)?;
                 let unstaged = crate::git::list_unstaged_paths(&self.repo)?;
 
-                let staged_set: std::collections::BTreeSet<String> = staged.iter().cloned().collect();
+                let staged_set: std::collections::BTreeSet<String> =
+                    staged.iter().cloned().collect();
                 let unstaged_set: std::collections::BTreeSet<String> =
                     unstaged.iter().cloned().collect();
 
@@ -566,11 +633,25 @@ impl App {
                 out.extend(unstaged);
                 (out, staged_set, unstaged_set)
             }
-            ViewKind::Unstaged => (crate::git::list_unstaged_paths(&self.repo)?, Default::default(), Default::default()),
-            ViewKind::Staged => (crate::git::list_staged_paths(&self.repo)?, Default::default(), Default::default()),
+            ViewKind::Unstaged => (
+                crate::git::list_unstaged_paths(&self.repo)?,
+                Default::default(),
+                Default::default(),
+            ),
+            ViewKind::Staged => (
+                crate::git::list_staged_paths(&self.repo)?,
+                Default::default(),
+                Default::default(),
+            ),
             ViewKind::Base => {
-                let Some(base) = &self.base_ref else { return Ok(Vec::new()) };
-                (crate::git::list_base_paths(&self.repo, base)?, Default::default(), Default::default())
+                let Some(base) = &self.base_ref else {
+                    return Ok(Vec::new());
+                };
+                (
+                    crate::git::list_base_paths(&self.repo, base)?,
+                    Default::default(),
+                    Default::default(),
+                )
             }
         };
 
@@ -605,7 +686,11 @@ impl App {
                 ViewKind::Staged => FileStageKind::Staged,
                 ViewKind::Base => FileStageKind::None,
             };
-            out.push(FileEntry { path, change, stage });
+            out.push(FileEntry {
+                path,
+                change,
+                stage,
+            });
         }
         Ok(out)
     }
@@ -662,12 +747,7 @@ impl App {
             DiffViewMode::SideBySide => self.build_side_by_side_rows(&path, &diff_lines, &raw)?,
         };
 
-        rows.insert(
-            0,
-            RenderRow::FileHeader {
-                path: path.clone(),
-            },
-        );
+        rows.insert(0, RenderRow::FileHeader { path: path.clone() });
 
         self.diff_rows = rows;
         self.diff_cursor = self
@@ -786,10 +866,16 @@ impl App {
             return Ok(());
         };
         let existing = match target.locator {
-            CommentLocator::File => self.review.file_comment(&target.path).unwrap_or(""),
-            CommentLocator::Line { side, line } => {
-                self.review.line_comment(&target.path, side, line).unwrap_or("")
-            }
+            CommentLocator::File => self
+                .review
+                .file_comment(&target.path)
+                .map(|c| c.body.as_str())
+                .unwrap_or(""),
+            CommentLocator::Line { side, line } => self
+                .review
+                .line_comment(&target.path, side, line)
+                .map(|c| c.body.as_str())
+                .unwrap_or(""),
         };
         self.editor_target = Some(target);
         self.editor_buffer = crate::ui::NoteBuffer::from_string(existing.to_string());
@@ -820,7 +906,8 @@ impl App {
             match target.locator {
                 CommentLocator::File => self.review.set_file_comment(&target.path, comment),
                 CommentLocator::Line { side, line } => {
-                    self.review.set_line_comment(&target.path, side, line, comment)
+                    self.review
+                        .set_line_comment(&target.path, side, line, comment)
                 }
             }
             self.review_dirty = true;
@@ -877,14 +964,30 @@ impl App {
     }
 
     fn save_review(&mut self) -> Result<()> {
-        let Some(oid) = self.review_oid else {
-            self.status = "No review target (missing base ref?)".to_string();
+        let Some(head) = self.head_commit_oid else {
+            self.status = "No HEAD commit — cannot write notes".to_string();
             return Ok(());
         };
-        let note = crate::review::encode_note(&self.review);
-        crate::notes::write(&self.repo, &self.notes_ref, &oid, Some(&note)).context("write review note")?;
+        let base_for_key = self.base_ref_for_key();
+        let mut wrote = 0usize;
+        for e in &self.files {
+            let oid =
+                crate::git::note_file_key_oid(&self.repo, head, self.view, base_for_key, &e.path)?;
+            match self.review.files.get(&e.path) {
+                Some(file) if !file.comments.is_empty() || file.file_comment.is_some() => {
+                    let note = crate::review::encode_file_note(file);
+                    crate::notes::write(&self.repo, &self.notes_ref, &oid, Some(&note))
+                        .with_context(|| format!("write file note for '{}'", e.path))?;
+                    wrote += 1;
+                }
+                _ => {
+                    crate::notes::write(&self.repo, &self.notes_ref, &oid, None)
+                        .with_context(|| format!("delete file note for '{}'", e.path))?;
+                }
+            }
+        }
         self.review_dirty = false;
-        self.status = "Saved review note".to_string();
+        self.status = format!("Saved review notes ({wrote} files)");
         Ok(())
     }
 }
@@ -934,15 +1037,12 @@ impl App {
     }
 
     fn toggle_diff_view_mode(&mut self) -> Result<()> {
-        let keep_new_line = self
-            .diff_rows
-            .get(self.diff_cursor)
-            .and_then(|r| match r {
-                RenderRow::Unified(r) => r.new_line,
-                RenderRow::SideBySide(r) => r.new_line,
-                RenderRow::Section { .. } => None,
-                RenderRow::FileHeader { .. } => None,
-            });
+        let keep_new_line = self.diff_rows.get(self.diff_cursor).and_then(|r| match r {
+            RenderRow::Unified(r) => r.new_line,
+            RenderRow::SideBySide(r) => r.new_line,
+            RenderRow::Section { .. } => None,
+            RenderRow::FileHeader { .. } => None,
+        });
 
         self.diff_view_mode = match self.diff_view_mode {
             DiffViewMode::Unified => DiffViewMode::SideBySide,
@@ -1022,9 +1122,10 @@ impl App {
                         )]
                     })
                 }
-                _ => diff_hl.get(idx).cloned().unwrap_or_else(|| {
-                    vec![ratatui::text::Span::raw(dl.text.clone())]
-                }),
+                _ => diff_hl
+                    .get(idx)
+                    .cloned()
+                    .unwrap_or_else(|| vec![ratatui::text::Span::raw(dl.text.clone())]),
             };
             rows.push(RenderRow::Unified(DiffRow {
                 kind: dl.kind,
