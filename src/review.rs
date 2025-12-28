@@ -399,11 +399,13 @@ mod tests {
 
     #[test]
     fn file_note_roundtrip_v2() {
-        let mut fr = FileReview::default();
-        fr.file_comment = Some(Comment {
-            body: "file-level".to_string(),
-            resolved: true,
-        });
+        let mut fr = FileReview {
+            file_comment: Some(Comment {
+                body: "file-level".to_string(),
+                resolved: true,
+            }),
+            ..Default::default()
+        };
         fr.comments.insert(
             LineKey {
                 side: LineSide::New,
