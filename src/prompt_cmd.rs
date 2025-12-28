@@ -70,7 +70,7 @@ pub fn run() -> Result<()> {
     paths.sort();
     paths.dedup();
 
-    let mut review = Review::new("all", base_ref.clone());
+    let mut review = Review::new();
     let mut views_to_scan = vec![ViewKind::All, ViewKind::Staged, ViewKind::Unstaged];
     if base_ref.is_some() {
         views_to_scan.push(ViewKind::Base);

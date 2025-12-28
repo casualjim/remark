@@ -205,7 +205,7 @@ impl App {
             mode: Mode::Browse,
             diff_view_mode: DiffViewMode::Unified,
             head_commit_oid: None,
-            review: Review::new("all", None),
+            review: Review::new(),
             files: Vec::new(),
             file_selected: 0,
             file_scroll: 0,
@@ -560,21 +560,21 @@ impl App {
         self.files = self.list_files_for_view()?;
         if self.view == ViewKind::Base && self.base_ref.is_none() {
             self.diff_rows.clear();
-            self.review = Review::new(self.view_kind_string(), None);
+            self.review = Review::new();
             self.review.files.clear();
             return Ok(());
         }
         if self.files.is_empty() {
             self.diff_rows.clear();
             self.status = "No changes".to_string();
-            self.review = Review::new(self.view_kind_string(), self.base_ref_for_review());
+            self.review = Review::new();
             self.review.files.clear();
             return Ok(());
         }
 
         // Build an in-memory review by loading per-file notes for the current HEAD commit.
         // Notes are treated as view-agnostic (staged/unstaged/all) for worktree reviews.
-        self.review = Review::new(self.view_kind_string(), self.base_ref_for_review());
+        self.review = Review::new();
         self.review.files.clear();
         if let Some(head) = self.head_commit_oid {
             let base_for_key = self.base_ref_for_key().map(|s| s.to_string());
@@ -636,14 +636,14 @@ impl App {
 
         if self.view == ViewKind::Base && self.base_ref.is_none() {
             self.diff_rows.clear();
-            self.review = Review::new(self.view_kind_string(), None);
+            self.review = Review::new();
             self.review.files.clear();
             self.status = "No base ref set (pass --base <ref>)".to_string();
             return Ok(());
         }
         if self.files.is_empty() {
             self.diff_rows.clear();
-            self.review = Review::new(self.view_kind_string(), self.base_ref_for_review());
+            self.review = Review::new();
             self.review.files.clear();
             self.status = "No changes".to_string();
             self.file_selected = 0;
@@ -664,7 +664,7 @@ impl App {
         }
 
         // Rebuild an in-memory view of notes (in case an external process edited notes).
-        self.review = Review::new(self.view_kind_string(), self.base_ref_for_review());
+        self.review = Review::new();
         self.review.files.clear();
         if let Some(head) = self.head_commit_oid {
             let base_for_key = self.base_ref_for_key().map(|s| s.to_string());
@@ -757,25 +757,9 @@ impl App {
         })
     }
 
-    fn view_kind_string(&self) -> &'static str {
-        match self.view {
-            ViewKind::All => "all",
-            ViewKind::Unstaged => "unstaged",
-            ViewKind::Staged => "staged",
-            ViewKind::Base => "base",
-        }
-    }
-
     fn base_ref_for_key(&self) -> Option<&str> {
         match self.view {
             ViewKind::Base => self.base_ref.as_deref(),
-            _ => None,
-        }
-    }
-
-    fn base_ref_for_review(&self) -> Option<String> {
-        match self.view {
-            ViewKind::Base => self.base_ref.clone(),
             _ => None,
         }
     }

@@ -62,8 +62,6 @@ impl<'de> Deserialize<'de> for LineKey {
 
 #[derive(Debug, Clone)]
 pub struct Review {
-    pub kind: String,
-    pub base_ref: Option<String>,
     pub files: BTreeMap<String, FileReview>,
 }
 
@@ -83,10 +81,8 @@ pub enum CommentState {
 }
 
 impl Review {
-    pub fn new(kind: impl Into<String>, base_ref: Option<String>) -> Self {
+    pub fn new() -> Self {
         Self {
-            kind: kind.into(),
-            base_ref,
             files: BTreeMap::new(),
         }
     }
@@ -304,17 +300,11 @@ pub fn decode_file_note(note: &str) -> Option<FileReview> {
 
 pub fn render_prompt(review: &Review) -> String {
     let mut out = String::new();
-    out.push_str(&format!("Target: {}\n", review.kind));
-    if let Some(b) = &review.base_ref {
-        out.push_str(&format!("Base: {b}\n"));
-    }
-    out.push('\n');
     if review.files.is_empty() {
         out.push_str("No comments.\n");
         return out;
     }
 
-    let mut todos: Vec<(String, String)> = Vec::new();
     let mut wrote_any = false;
 
     for (path, f) in &review.files {
@@ -339,7 +329,6 @@ pub fn render_prompt(review: &Review) -> String {
             .filter(|s| !s.is_empty())
         {
             out.push_str(&format!("- File: {fc}\n"));
-            todos.push((path.clone(), fc.to_string()));
         }
         for (line, comment) in &f.comments {
             if comment.resolved {
@@ -361,14 +350,6 @@ pub fn render_prompt(review: &Review) -> String {
     if !wrote_any {
         out.push_str("No comments.\n");
         return out;
-    }
-
-    if !todos.is_empty() {
-        out.push_str("## TODOs\n");
-        for (path, c) in todos {
-            out.push_str(&format!("- {path}: {c}\n"));
-        }
-        out.push('\n');
     }
     out
 }
@@ -501,8 +482,8 @@ mod tests {
     }
 
     #[test]
-    fn prompt_omits_resolved_comments_and_adds_todos() {
-        let mut r = Review::new("all", None);
+    fn prompt_omits_resolved_comments() {
+        let mut r = Review::new();
 
         r.set_file_comment("a.rs", "File todo".to_string());
         r.set_line_comment("a.rs", LineSide::New, 10, "Fix this".to_string());
@@ -517,6 +498,8 @@ mod tests {
         r.toggle_file_comment_resolved("b.rs");
 
         let p = render_prompt(&r);
+        assert!(!p.contains("Target:"));
+        assert!(!p.contains("Base:"));
         assert!(p.contains("## a.rs"));
         assert!(p.contains("Line 10 (new): Fix this"));
         assert!(!p.contains("File: File todo"));
@@ -527,10 +510,20 @@ mod tests {
 
     #[test]
     fn prompt_shows_no_comments_when_all_resolved() {
-        let mut r = Review::new("all", None);
+        let mut r = Review::new();
         r.set_file_comment("a.rs", "done".to_string());
         r.toggle_file_comment_resolved("a.rs");
         let p = render_prompt(&r);
         assert!(p.contains("No comments."));
+    }
+
+    #[test]
+    fn prompt_does_not_duplicate_file_comments_as_todos() {
+        let mut r = Review::new();
+        r.set_file_comment("a.rs", "Do thing".to_string());
+        let p = render_prompt(&r);
+        assert!(p.contains("## a.rs"));
+        assert!(p.contains("File: Do thing"));
+        assert!(!p.contains("## TODOs"));
     }
 }
