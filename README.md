@@ -105,24 +105,22 @@ remark resolve --file src/lib.rs --line 42 --unresolve
 - `Tab` / `Shift-Tab`: switch focus between **Files** and **Diff**
 - `1` / `2` / `3` / `4`: switch view **all / unstaged / staged / base**
 - `i`: toggle diff mode **unified ↔ side-by-side**
+- `R`: reload file list
 - `↑` / `↓`: move selection (focused pane)
 - `PgUp` / `PgDn`: scroll (focused pane)
 - `c`: add/edit comment (file header or commentable line)
 - `d`: delete comment (file header or commentable line)
 - `r`: resolve/unresolve comment
-- `Ctrl+S`: save review notes to the configured notes ref
 - `p`: toggle prompt preview panel
 - `y`: copy prompt to clipboard (when prompt preview is open)
-- `q` / `Q`: quit (unsaved changes are discarded unless you saved with `Ctrl+S`)
+- `q` / `Q`: quit
 - `?`: help (press `?` or `Esc` again to close)
 
 ### Comment editor
 
 - `Enter`: newline
-- `F2` or `Alt+Enter`: accept comment and advance
+- `Ctrl+S` or `F2`: accept comment and advance
 - `Esc`: cancel editor
-
-Note: many terminals do not reliably distinguish `Shift+Enter` / `Ctrl+Enter`, which is why acceptance uses `F2` / `Alt+Enter`.
 
 ## What counts as “commentable”
 
@@ -142,7 +140,7 @@ Reviews are stored as **git notes** under a configurable ref (default `refs/note
 Notes are attached to **synthetic object ids** derived from:
 
 - the current `HEAD` commit id
-- the selected view (`all`, `staged`, `unstaged`, `base:<ref>`)
+- the review mode (`all` for worktree reviews, or `base:<ref>` for base comparisons)
 - the file path
 
 This means each reviewed file gets its **own note**, and when you create a new commit you naturally get a fresh set of notes for that commit.

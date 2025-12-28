@@ -67,8 +67,6 @@ pub struct DrawState<'a> {
     pub focus: Focus,
     pub mode: Mode,
     pub diff_view_mode: DiffViewMode,
-
-    pub review_dirty: bool,
     pub review: &'a Review,
 
     pub files: &'a [FileEntry],
@@ -606,18 +604,12 @@ fn draw_footer(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
             )
         }
         Mode::EditComment => {
-            let s = "comment editor  (F2 accept)  (Esc cancel)".to_string();
+            let s = "comment editor  (Ctrl+S accept)  (Esc cancel)".to_string();
             fit_with_ellipsis(&s, area.width as usize)
         }
     };
 
-    if s.review_dirty {
-        // Append only if it fits; otherwise the footer becomes useless.
-        let suffix = "  [unsaved]";
-        if left.chars().count() + suffix.chars().count() <= area.width as usize {
-            left.push_str(suffix);
-        }
-    }
+    // Notes are written immediately on accept/delete/resolve; we don't display an "unsaved" state.
     if !s.status.is_empty() {
         let suffix = format!("  |  {}", s.status);
         if left.chars().count() + suffix.chars().count() <= area.width as usize {
@@ -664,18 +656,19 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect) {
         Line::from("Diff"),
         Line::from("  Up/Down, PgUp/Dn  Navigate diff"),
         Line::from("  i                 Toggle unified / side-by-side"),
+        Line::from("  R                 Reload file list"),
         Line::from("  c                 Add/edit comment (file or line)"),
         Line::from("  d                 Delete comment (file or line)"),
         Line::from("  r                 Resolve/unresolve comment"),
         Line::from(""),
         Line::from("Review"),
-        Line::from("  Ctrl+S            Save review notes"),
-        Line::from("  p                Toggle prompt preview"),
-        Line::from("  y                Copy prompt to clipboard (when open)"),
-        Line::from("  q / Q            Quit"),
+        Line::from("  p                 Toggle prompt preview"),
+        Line::from("  y                 Copy prompt to clipboard (when open)"),
+        Line::from("  q / Q             Quit"),
         Line::from(""),
         Line::from("Comment editor"),
-        Line::from("  F2 / Alt+Enter    Accept and move on"),
+        Line::from("  Ctrl+S / F2        Accept and move on"),
+        Line::from("  Enter             Newline"),
         Line::from("  Esc               Cancel"),
         Line::from(""),
         Line::from("Help"),
@@ -737,16 +730,13 @@ fn draw_comment_editor(f: &mut ratatui::Frame, diff_area: Rect, s: &DrawState<'_
 
     f.render_widget(Clear, popup);
     let title = match target.locator {
-        CommentLocator::File => format!("Comment {} (file)  (F2/Alt+Enter accept)", target.path),
+        CommentLocator::File => format!("Comment {} (file)  (Ctrl+S accept)", target.path),
         CommentLocator::Line { side, line } => {
             let side = match side {
                 crate::review::LineSide::Old => "old",
                 crate::review::LineSide::New => "new",
             };
-            format!(
-                "Comment {}:{} ({side})  (F2/Alt+Enter accept)",
-                target.path, line
-            )
+            format!("Comment {}:{} ({side})  (Ctrl+S accept)", target.path, line)
         }
     };
     let block = Block::default()
