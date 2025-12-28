@@ -90,8 +90,8 @@ remark prompt --copy
 - `i`: toggle diff mode **unified ↔ side-by-side**
 - `↑` / `↓`: move selection (focused pane)
 - `PgUp` / `PgDn`: scroll (focused pane)
-- `c`: add/edit comment on the current line (commentable lines only)
-- `d`: delete comment on the current line
+- `c`: add/edit comment (file header or commentable line)
+- `d`: delete comment (file header or commentable line)
 - `Ctrl+S`: save review note to the configured notes ref
 - `p`: toggle prompt preview panel
 - `y`: copy prompt to clipboard (when prompt preview is open)
@@ -107,12 +107,12 @@ Note: many terminals do not reliably distinguish `Shift+Enter` / `Ctrl+Enter`, w
 
 ## What counts as “commentable”
 
-Line comments are attached to **new-file line numbers** (the “right” side):
+`remark` supports:
 
-- Unified mode: context and added lines have a `new_line` number and can be commented.
-- Side-by-side mode: comments attach to the **right** column’s line number.
-
-Removed-only lines don’t have a new-file line number; they are not commentable currently.
+- **File-level comments**: select the file header row at the top of the diff and press `c`.
+- **Line comments**:
+  - Added/context lines attach to **new** (right) line numbers.
+  - Removed lines attach to **old** (left) line numbers.
 
 ## Storage model
 
@@ -131,7 +131,9 @@ Notes are attached to a **synthetic object id** derived from the view parameters
 
 Each note is markdown with an embedded JSON block:
 
-- JSON contains per-file line comments keyed by `(path, 1-based new_line_number)`.
+- JSON contains per-file comments:
+  - a file-level comment (optional)
+  - line comments keyed by `(old|new, 1-based line_number)`
 - The markdown also includes a “Review (LLM Prompt)” section which is what `remark prompt` renders.
 
 ## Clipboard behavior
@@ -141,12 +143,11 @@ When copying a prompt (`y` in prompt preview, or `remark prompt --copy`):
 1. `remark` tries the desktop clipboard via `copypasta` (works on Wayland/X11/macOS/Windows depending on environment).
 2. If that fails (common in headless/SSH sessions), it falls back to **OSC52**, which asks your terminal emulator to place the text into your local clipboard.
 
-## Current limitations / roadmap
+## Current limitations
 
-- No fuzzy file picker yet (only file list navigation).
-- Comments are currently line-level only; no multi-line / file-level comments.
-- Removed-only lines aren’t commentable yet (no stable “new line” anchor).
-- UI styling is intentionally simple; more “delta-like” header formatting can be expanded further (file headers, hunk metadata rendering, etc.).
+- Comments are currently file-level + line-level only; no multi-line / hunk-level comments.
+- Comments are anchored to old/new line numbers (they can drift as the diff changes).
+- UI styling is intentionally simple (especially around file/hunk headers).
 
 ## Implementation notes
 
@@ -158,4 +159,3 @@ Core libraries used:
 - `syntastica` + `syntastica-parsers` + `syntastica-themes` for syntax highlighting
 - `hyperpolyglot` for language detection
 - `copypasta` (desktop clipboard) + OSC52 fallback (remote clipboard-friendly)
-

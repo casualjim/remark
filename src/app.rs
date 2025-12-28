@@ -8,7 +8,7 @@ use gix::ObjectId;
 
 use crate::git::ViewKind;
 use crate::highlight::Highlighter;
-use crate::review::Review;
+use crate::review::{LineSide, Review};
 
 const DEFAULT_NOTES_REF: &str = "refs/notes/remark";
 
@@ -49,7 +49,7 @@ impl Config {
 
 fn print_help_and_exit() -> ! {
     eprintln!(
-        "remark\n\nUSAGE:\n  remark [--ref <notes-ref>] [--base <ref>]\n\nOPTIONS:\n  --ref <notes-ref>   Notes ref to store reviews (default: {DEFAULT_NOTES_REF})\n  --base <ref>        Base ref for base view (default: @{{upstream}} / main / master)\n\nKEYS (browse):\n  Tab / Shift+Tab     focus files/diff\n  1/2/3/4             all/unstaged/staged/base\n  i                   toggle unified/side-by-side diff\n  Up/Down             navigate (focused pane)\n  PgUp/PgDn           scroll (focused pane)\n  Enter               focus diff (from files)\n  c                   add/edit comment on line\n  d                   delete comment on line\n  Ctrl+S              save review note\n  p                   preview collated prompt\n  y                   copy prompt to clipboard (when open)\n  ?                   help\n  q                   quit\n  Q                   quit (force)\n\nKEYS (comment editor):\n  Enter               newline\n  F2 / Alt+Enter      accept comment and move on\n  Esc                 cancel\n"
+        "remark\n\nUSAGE:\n  remark [--ref <notes-ref>] [--base <ref>]\n\nOPTIONS:\n  --ref <notes-ref>   Notes ref to store reviews (default: {DEFAULT_NOTES_REF})\n  --base <ref>        Base ref for base view (default: @{{upstream}} / main / master)\n\nKEYS (browse):\n  Tab / Shift+Tab     focus files/diff\n  1/2/3/4             all/unstaged/staged/base\n  i                   toggle unified/side-by-side diff\n  Up/Down             navigate (focused pane)\n  PgUp/PgDn           scroll (focused pane)\n  Enter               focus diff (from files)\n  c                   add/edit comment (file or line)\n  d                   delete comment (file or line)\n  Ctrl+S              save review note\n  p                   preview collated prompt\n  y                   copy prompt to clipboard (when open)\n  ?                   help\n  q / Q               quit\n\nKEYS (comment editor):\n  Enter               newline\n  F2 / Alt+Enter      accept comment and move on\n  Esc                 cancel\n"
     );
     std::process::exit(2);
 }
@@ -66,10 +66,16 @@ pub(crate) enum Focus {
     Diff,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommentLocator {
+    File,
+    Line { side: LineSide, line: u32 },
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct CommentTarget {
     pub(crate) path: String,
-    pub(crate) line: u32,
+    pub(crate) locator: CommentLocator,
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +104,7 @@ pub(crate) struct SideBySideRow {
 
 #[derive(Debug, Clone)]
 pub(crate) enum RenderRow {
+    FileHeader { path: String },
     Section { text: String },
     Unified(DiffRow),
     SideBySide(SideBySideRow),
@@ -650,13 +657,24 @@ impl App {
             .join("\n")
             + "\n";
 
-        let rows = match self.diff_view_mode {
+        let mut rows = match self.diff_view_mode {
             DiffViewMode::Unified => self.build_unified_rows(&path, &diff_lines, &raw)?,
             DiffViewMode::SideBySide => self.build_side_by_side_rows(&path, &diff_lines, &raw)?,
         };
 
+        rows.insert(
+            0,
+            RenderRow::FileHeader {
+                path: path.clone(),
+            },
+        );
+
         self.diff_rows = rows;
-        self.diff_cursor = 0;
+        self.diff_cursor = self
+            .diff_rows
+            .iter()
+            .position(|r| matches!(r, RenderRow::Unified(_) | RenderRow::SideBySide(_)))
+            .unwrap_or(0);
         self.diff_scroll = 0;
         self.status = path;
         Ok(())
@@ -723,17 +741,42 @@ impl App {
             return None;
         };
         let row = self.diff_rows.get(self.diff_cursor)?;
-        let line = match row {
-            RenderRow::Unified(r) => r.new_line?,
-            RenderRow::SideBySide(r) => match r.right_kind {
-                Some(crate::diff::Kind::Add) | Some(crate::diff::Kind::Context) => r.new_line?,
+        let locator = match row {
+            RenderRow::FileHeader { .. } => CommentLocator::File,
+            RenderRow::Unified(r) => match r.kind {
+                crate::diff::Kind::Remove => CommentLocator::Line {
+                    side: LineSide::Old,
+                    line: r.old_line?,
+                },
+                crate::diff::Kind::Add | crate::diff::Kind::Context => CommentLocator::Line {
+                    side: LineSide::New,
+                    line: r.new_line?,
+                },
                 _ => return None,
             },
+            RenderRow::SideBySide(r) => {
+                if matches!(
+                    r.right_kind,
+                    Some(crate::diff::Kind::Add) | Some(crate::diff::Kind::Context)
+                ) {
+                    CommentLocator::Line {
+                        side: LineSide::New,
+                        line: r.new_line?,
+                    }
+                } else if matches!(r.left_kind, Some(crate::diff::Kind::Remove)) {
+                    CommentLocator::Line {
+                        side: LineSide::Old,
+                        line: r.old_line?,
+                    }
+                } else {
+                    return None;
+                }
+            }
             RenderRow::Section { .. } => return None,
         };
         Some(CommentTarget {
             path: path.to_string(),
-            line,
+            locator,
         })
     }
 
@@ -742,7 +785,12 @@ impl App {
             self.status = "Not a commentable line".to_string();
             return Ok(());
         };
-        let existing = self.review.comment(&target.path, target.line).unwrap_or("");
+        let existing = match target.locator {
+            CommentLocator::File => self.review.file_comment(&target.path).unwrap_or(""),
+            CommentLocator::Line { side, line } => {
+                self.review.line_comment(&target.path, side, line).unwrap_or("")
+            }
+        };
         self.editor_target = Some(target);
         self.editor_buffer = crate::ui::NoteBuffer::from_string(existing.to_string());
         self.show_help = false;
@@ -759,11 +807,22 @@ impl App {
 
         let comment = self.editor_buffer.as_string();
         if comment.trim().is_empty() {
-            if self.review.remove_comment(&target.path, target.line) {
+            let removed = match target.locator {
+                CommentLocator::File => self.review.remove_file_comment(&target.path),
+                CommentLocator::Line { side, line } => {
+                    self.review.remove_line_comment(&target.path, side, line)
+                }
+            };
+            if removed {
                 self.review_dirty = true;
             }
         } else {
-            self.review.set_comment(&target.path, target.line, comment);
+            match target.locator {
+                CommentLocator::File => self.review.set_file_comment(&target.path, comment),
+                CommentLocator::Line { side, line } => {
+                    self.review.set_line_comment(&target.path, side, line, comment)
+                }
+            }
             self.review_dirty = true;
         }
 
@@ -772,12 +831,24 @@ impl App {
         self.editor_buffer = crate::ui::NoteBuffer::new();
 
         for i in (self.diff_cursor + 1)..self.diff_rows.len() {
-            let has_new = match &self.diff_rows[i] {
-                RenderRow::Unified(r) => r.new_line.is_some(),
-                RenderRow::SideBySide(r) => r.new_line.is_some(),
+            let commentable = match &self.diff_rows[i] {
+                RenderRow::FileHeader { .. } => true,
+                RenderRow::Unified(r) => match r.kind {
+                    crate::diff::Kind::Remove => r.old_line.is_some(),
+                    crate::diff::Kind::Add | crate::diff::Kind::Context => r.new_line.is_some(),
+                    _ => false,
+                },
+                RenderRow::SideBySide(r) => {
+                    (matches!(
+                        r.right_kind,
+                        Some(crate::diff::Kind::Add) | Some(crate::diff::Kind::Context)
+                    ) && r.new_line.is_some())
+                        || (matches!(r.left_kind, Some(crate::diff::Kind::Remove))
+                            && r.old_line.is_some())
+                }
                 RenderRow::Section { .. } => false,
             };
-            if has_new {
+            if commentable {
                 self.diff_cursor = i;
                 return;
             }
@@ -790,7 +861,13 @@ impl App {
             self.status = "Not a commentable line".to_string();
             return Ok(());
         };
-        if self.review.remove_comment(&target.path, target.line) {
+        let removed = match target.locator {
+            CommentLocator::File => self.review.remove_file_comment(&target.path),
+            CommentLocator::Line { side, line } => {
+                self.review.remove_line_comment(&target.path, side, line)
+            }
+        };
+        if removed {
             self.review_dirty = true;
             self.status = "Deleted comment".to_string();
         } else {
@@ -864,6 +941,7 @@ impl App {
                 RenderRow::Unified(r) => r.new_line,
                 RenderRow::SideBySide(r) => r.new_line,
                 RenderRow::Section { .. } => None,
+                RenderRow::FileHeader { .. } => None,
             });
 
         self.diff_view_mode = match self.diff_view_mode {
@@ -878,6 +956,7 @@ impl App {
                 RenderRow::Unified(r) => r.new_line == Some(n),
                 RenderRow::SideBySide(r) => r.new_line == Some(n),
                 RenderRow::Section { .. } => false,
+                RenderRow::FileHeader { .. } => false,
             }) {
                 self.diff_cursor = idx;
             }
