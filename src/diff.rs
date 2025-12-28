@@ -67,15 +67,49 @@ impl ConsumeHunk for CollectUnified {
     type Out = CollectUnified;
 
     fn consume_hunk(&mut self, header: HunkHeader, lines: &[(DiffLineKind, &[u8])]) -> std::io::Result<()> {
+        let hint = lines
+            .iter()
+            .filter_map(|(k, bytes)| {
+                // Prefer context lines for a stable "where am I" hint.
+                if !matches!(k, DiffLineKind::Context) {
+                    return None;
+                }
+                let txt = String::from_utf8_lossy(bytes);
+                let trimmed = txt.trim_matches(['\n', '\r']).trim();
+                if trimmed.is_empty() {
+                    return None;
+                }
+                Some(trimmed.to_string())
+            })
+            .next()
+            .or_else(|| {
+                // If there is no context, fall back to the first non-empty changed line.
+                lines.iter().find_map(|(_k, bytes)| {
+                    let txt = String::from_utf8_lossy(bytes);
+                    let trimmed = txt.trim_matches(['\n', '\r']).trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                })
+            });
+
+        let mut header_text = format!(
+            "@@ -{},{} +{},{} @@",
+            header.before_hunk_start,
+            header.before_hunk_len,
+            header.after_hunk_start,
+            header.after_hunk_len
+        );
+        if let Some(h) = hint {
+            header_text.push(' ');
+            header_text.push_str(&h);
+        }
+
         self.lines.push(Line {
             kind: Kind::HunkHeader,
-            text: format!(
-                "@@ -{},{} +{},{} @@",
-                header.before_hunk_start,
-                header.before_hunk_len,
-                header.after_hunk_start,
-                header.after_hunk_len
-            ),
+            text: header_text,
             old_line: None,
             new_line: None,
         });

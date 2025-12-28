@@ -14,8 +14,8 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::app::{
-    CommentTarget, DiffViewMode, FileChangeKind, FileEntry, FileStageKind, Focus, Mode, RenderRow,
-    SideBySideRow,
+    CommentLocator, CommentTarget, DiffViewMode, FileChangeKind, FileEntry, FileStageKind, Focus,
+    Mode, RenderRow, SideBySideRow,
 };
 use crate::git::ViewKind;
 use crate::review::Review;
@@ -144,9 +144,12 @@ fn draw_files(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
             FileChangeKind::Deleted => ("D", Color::Red),
             FileChangeKind::Modified => ("M", Color::Yellow),
         };
+        let has_any = s.review.has_any_comments(&e.path);
+        let cm = if has_any { "💬" } else { " " };
         items.push(ListItem::new(Line::from(vec![
             Span::styled(format!("{st} "), Style::default().fg(st_color)),
             Span::styled(format!("{tag} "), Style::default().fg(color)),
+            Span::styled(format!("{cm} "), Style::default().fg(if has_any { Color::Yellow } else { Color::DarkGray })),
             Span::raw(e.path.clone()),
         ])));
     }
@@ -171,7 +174,14 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
     } else {
         s.files
             .get(s.file_selected)
-            .map(|e| format!("Diff — {}", e.path))
+            .map(|e| {
+                let has_file = s
+                    .review
+                    .file_comment(&e.path)
+                    .map(|c| !c.trim().is_empty())
+                    .unwrap_or(false);
+                format!("Diff — {}{}", e.path, if has_file { " 💬" } else { "" })
+            })
             .unwrap_or_else(|| "Diff".to_string())
     };
 
@@ -194,6 +204,7 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
             RenderRow::Unified(r) => r.old_line,
             RenderRow::SideBySide(r) => r.old_line,
             RenderRow::Section { .. } => None,
+            RenderRow::FileHeader { .. } => None,
         })
         .max()
         .unwrap_or(0);
@@ -204,6 +215,7 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
             RenderRow::Unified(r) => r.new_line,
             RenderRow::SideBySide(r) => r.new_line,
             RenderRow::Section { .. } => None,
+            RenderRow::FileHeader { .. } => None,
         })
         .max()
         .unwrap_or(0);
@@ -219,41 +231,82 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
         let abs_idx = scroll + i;
 
         let path = s.files.get(s.file_selected).map(|e| e.path.as_str());
-        let (commentable, has_comment) = match row {
-            RenderRow::Unified(r) => {
-                let commentable = matches!(r.kind, crate::diff::Kind::Add | crate::diff::Kind::Context)
-                    && r.new_line.is_some()
-                    && path.is_some();
-                let has_comment = match (path, r.new_line) {
-                    (Some(p), Some(n)) => s
-                        .review
-                        .comment(p, n)
-                        .map(|c| !c.trim().is_empty())
-                        .unwrap_or(false),
-                    _ => false,
-                };
-                (commentable, has_comment)
-            }
-            RenderRow::SideBySide(r) => {
-                let commentable = matches!(
+        let locator = match (row, path) {
+            (RenderRow::FileHeader { .. }, Some(_)) => Some(CommentLocator::File),
+            (RenderRow::Unified(r), Some(_)) => match r.kind {
+                crate::diff::Kind::Remove => r
+                    .old_line
+                    .map(|line| CommentLocator::Line { side: crate::review::LineSide::Old, line }),
+                crate::diff::Kind::Add | crate::diff::Kind::Context => r
+                    .new_line
+                    .map(|line| CommentLocator::Line { side: crate::review::LineSide::New, line }),
+                _ => None,
+            },
+            (RenderRow::SideBySide(r), Some(_)) => {
+                if matches!(
                     r.right_kind,
                     Some(crate::diff::Kind::Add) | Some(crate::diff::Kind::Context)
-                ) && r.new_line.is_some()
-                    && path.is_some();
-                let has_comment = match (path, r.new_line) {
-                    (Some(p), Some(n)) => s
-                        .review
-                        .comment(p, n)
-                        .map(|c| !c.trim().is_empty())
-                        .unwrap_or(false),
-                    _ => false,
-                };
-                (commentable, has_comment)
+                ) {
+                    r.new_line.map(|line| CommentLocator::Line {
+                        side: crate::review::LineSide::New,
+                        line,
+                    })
+                } else if matches!(r.left_kind, Some(crate::diff::Kind::Remove)) {
+                    r.old_line.map(|line| CommentLocator::Line {
+                        side: crate::review::LineSide::Old,
+                        line,
+                    })
+                } else {
+                    None
+                }
             }
-            RenderRow::Section { .. } => (false, false),
+            _ => None,
+        };
+
+        let commentable = locator.is_some();
+        let has_comment = match (path, locator) {
+            (Some(p), Some(CommentLocator::File)) => s
+                .review
+                .file_comment(p)
+                .map(|c| !c.trim().is_empty())
+                .unwrap_or(false),
+            (Some(p), Some(CommentLocator::Line { side, line })) => s
+                .review
+                .line_comment(p, side, line)
+                .map(|c| !c.trim().is_empty())
+                .unwrap_or(false),
+            _ => false,
         };
 
         match row {
+            RenderRow::FileHeader { path } => {
+                // Keep this gutter column a fixed width (emoji are often 2 cells).
+                let marker = if has_comment { "💬" } else { "  " };
+                let old_s = " ".repeat(old_w);
+                let new_s = " ".repeat(new_w);
+
+                let mut spans: Vec<Span<'static>> = Vec::with_capacity(8);
+                spans.push(Span::styled(
+                    marker.to_string(),
+                    Style::default().fg(if has_comment { Color::Yellow } else { Color::Reset }),
+                ));
+                spans.push(Span::raw(" "));
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(old_s, Style::default().fg(Color::DarkGray)));
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(new_s, Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(
+                    path.clone(),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ));
+
+                let mut style = Style::default().bg(Color::Rgb(25, 25, 25));
+                if abs_idx == s.diff_cursor {
+                    style = style.add_modifier(Modifier::REVERSED);
+                }
+                rendered.push(Line::from(spans).style(style));
+            }
             RenderRow::Section { text } => {
                 let mut deco = format!("┄┄ {text} ┄┄");
                 let w = inner.width.max(1) as usize;
@@ -530,15 +583,14 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect) {
         Line::from("Diff"),
         Line::from("  Up/Down, PgUp/Dn  Navigate diff"),
         Line::from("  i                 Toggle unified / side-by-side"),
-        Line::from("  c                 Add/edit comment on line"),
-        Line::from("  d                 Delete comment"),
+        Line::from("  c                 Add/edit comment (file or line)"),
+        Line::from("  d                 Delete comment (file or line)"),
         Line::from(""),
         Line::from("Review"),
         Line::from("  Ctrl+S            Save review note"),
         Line::from("  p                Toggle prompt preview"),
         Line::from("  y                Copy prompt to clipboard (when open)"),
-        Line::from("  q                Quit"),
-        Line::from("  Q                Quit (force)"),
+        Line::from("  q / Q            Quit"),
         Line::from(""),
         Line::from("Comment editor"),
         Line::from("  F2 / Alt+Enter    Accept and move on"),
@@ -589,10 +641,19 @@ fn draw_comment_editor(f: &mut ratatui::Frame, diff_area: Rect, s: &DrawState<'_
     };
 
     f.render_widget(Clear, popup);
-    let title = format!(
-        "Comment {}:{}  (F2/Alt+Enter accept)",
-        target.path, target.line
-    );
+    let title = match target.locator {
+        CommentLocator::File => format!("Comment {} (file)  (F2/Alt+Enter accept)", target.path),
+        CommentLocator::Line { side, line } => {
+            let side = match side {
+                crate::review::LineSide::Old => "old",
+                crate::review::LineSide::New => "new",
+            };
+            format!(
+                "Comment {}:{} ({side})  (F2/Alt+Enter accept)",
+                target.path, line
+            )
+        }
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
