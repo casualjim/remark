@@ -41,4 +41,4 @@
 
 ## Release Notes (Maintainers)
 
-Releases are automated: pushes to `main` open/update a release PR via Release-plz; merging it creates a `vX.Y.Z` tag, which triggers `cargo-dist` to publish GitHub Release artifacts.
+Releases are cut via the `Cut Release` workflow, which runs `git-cliff` to update `CHANGELOG.md` and then uses `cargo-release` to tag `vX.Y.Z`. Pushing the tag triggers `cargo-dist` to publish GitHub Release artifacts.
