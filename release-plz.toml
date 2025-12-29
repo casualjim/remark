@@ -1,0 +1,12 @@
+[workspace]
+# Only release when the release PR is merged.
+release_always = false
+# Let cargo-dist create the GitHub Release + assets.
+git_release_enable = false
+# Keep tags in the vX.Y.Z format expected by cargo-dist.
+git_tag_name = "v{{ version }}"
+
+[[package]]
+name = "remark"
+# Skip crates.io publishing for this binary-only release flow.
+publish = false
