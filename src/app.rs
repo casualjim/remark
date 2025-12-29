@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -881,6 +882,31 @@ impl App {
             .into_iter()
             .filter(|l| l.kind != crate::diff::Kind::FileHeader)
             .collect();
+
+        let mut valid_old = HashSet::new();
+        let mut valid_new = HashSet::new();
+        for line in &diff_lines {
+            match line.kind {
+                crate::diff::Kind::Remove => {
+                    if let Some(n) = line.old_line {
+                        valid_old.insert(n);
+                    }
+                }
+                crate::diff::Kind::Add | crate::diff::Kind::Context => {
+                    if let Some(n) = line.new_line {
+                        valid_new.insert(n);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if self
+            .review
+            .prune_line_comments(&path, &valid_old, &valid_new)
+            && self.head_commit_oid.is_some()
+        {
+            self.persist_file_note(&path)?;
+        }
 
         let raw = diff_lines
             .iter()

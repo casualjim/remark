@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -196,6 +196,32 @@ impl Review {
         })?;
         c.resolved = !c.resolved;
         Some(c.resolved)
+    }
+
+    pub fn prune_line_comments(
+        &mut self,
+        path: &str,
+        valid_old: &HashSet<u32>,
+        valid_new: &HashSet<u32>,
+    ) -> bool {
+        let Some(f) = self.files.get_mut(path) else {
+            return false;
+        };
+
+        let before = f.comments.len();
+        f.comments.retain(|k, _| match k.side {
+            LineSide::Old => valid_old.contains(&k.line),
+            LineSide::New => valid_new.contains(&k.line),
+        });
+        let mut changed = f.comments.len() != before;
+
+        if f.file_comment.is_none() && f.comments.is_empty() {
+            if self.files.remove(path).is_some() {
+                changed = true;
+            }
+        }
+
+        changed
     }
 
     pub fn comment_state(&self, path: &str) -> CommentState {
@@ -506,6 +532,22 @@ mod tests {
         assert!(!p.contains("Restore this"));
         assert!(!p.contains("## b.rs"));
         assert!(!p.contains("## TODOs"));
+    }
+
+    #[test]
+    fn prune_line_comments_removes_unreachable() {
+        let mut r = Review::new();
+        r.set_line_comment("a.rs", LineSide::New, 10, "Fix this".to_string());
+        r.set_line_comment("a.rs", LineSide::Old, 2, "Restore this".to_string());
+
+        let mut valid_old = HashSet::new();
+        valid_old.insert(2);
+        let mut valid_new = HashSet::new();
+        valid_new.insert(11);
+
+        assert!(r.prune_line_comments("a.rs", &valid_old, &valid_new));
+        assert!(r.line_comment("a.rs", LineSide::Old, 2).is_some());
+        assert!(r.line_comment("a.rs", LineSide::New, 10).is_none());
     }
 
     #[test]
