@@ -215,10 +215,7 @@ impl Review {
         });
         let mut changed = f.comments.len() != before;
 
-        if f.file_comment.is_none()
-            && f.comments.is_empty()
-            && self.files.remove(path).is_some()
-        {
+        if f.file_comment.is_none() && f.comments.is_empty() && self.files.remove(path).is_some() {
             changed = true;
         }
 
