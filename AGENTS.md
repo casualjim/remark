@@ -1,0 +1,44 @@
+# Repository Guidelines
+
+## Project Overview
+
+`remark` is a Rust terminal UI (TUI) for writing code review notes in Git repos. Reviews are stored as git notes (default `refs/notes/remark`) and can be rendered into a collated prompt via `remark prompt`.
+
+## Project Structure
+
+- `src/`: Rust source code (single binary crate; entrypoint in `src/main.rs`).
+- `.github/workflows/`: CI and release automation (Rust checks, release-plz, cargo-dist).
+- `wix/`: Windows installer metadata used by `cargo-dist`/WiX.
+- `release-plz.toml`, `dist-workspace.toml`: release configuration (tagging, artifacts).
+
+## Build, Test, and Development Commands
+
+- `cargo build`: build a debug binary.
+- `cargo build --release`: build `target/release/remark`.
+- `cargo run -- <args>`: run locally (example: `cargo run -- prompt --filter base`).
+- `cargo fmt --all`: format code (CI enforces `-- --check`).
+- `cargo clippy --all-targets --all-features -- -D warnings`: lint (CI treats warnings as errors).
+- `cargo test --all`: run unit tests.
+
+## Coding Style & Naming Conventions
+
+- Rust edition: 2024 (see `Cargo.toml`).
+- Formatting: `rustfmt` with default settings; keep diffs small and idiomatic.
+- Linting: address `clippy` warnings instead of suppressing them.
+- Naming: follow standard Rust conventions (`UpperCamelCase` types, `snake_case` fns/modules).
+
+## Testing Guidelines
+
+- Tests are primarily unit tests colocated in modules (`mod tests { ... }` in `src/*.rs`).
+- Prefer small, behavior-focused tests; add new tests near the code they cover.
+- Run `cargo test --all` before opening a PR.
+
+## Commit & Pull Request Guidelines
+
+- Commit messages follow Conventional Commits (examples: `feat: ...`, `fix: ...`, `chore: ...`, `refactor: ...`, `test: ...`).
+- PRs should include: a clear description, rationale, and any user-facing behavior changes.
+- Ensure CI passes (`fmt`, `clippy`, `test`) before merging.
+
+## Release Notes (Maintainers)
+
+Releases are automated: pushes to `main` open/update a release PR via Release-plz; merging it creates a `vX.Y.Z` tag, which triggers `cargo-dist` to publish GitHub Release artifacts.

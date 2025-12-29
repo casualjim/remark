@@ -9,6 +9,9 @@ mod resolve_cmd;
 mod review;
 mod ui;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> anyhow::Result<()> {
     match std::env::args().nth(1).as_deref() {
         Some("prompt") => prompt_cmd::run(),
