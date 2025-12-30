@@ -1,8 +1,9 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
 use gix::bstr::{BStr, ByteSlice};
 use gix::{ObjectId, Repository};
+use gix_dir::walk::EmissionMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewKind {
@@ -73,20 +74,59 @@ pub fn note_file_key_oid(
     Ok(oid)
 }
 
-pub fn list_unstaged_paths(repo: &Repository) -> Result<Vec<String>> {
-    let mut out = BTreeSet::<String>::new();
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnstagedStatus {
+    Changed(char),
+    Untracked,
+    Ignored,
+}
+
+pub fn list_unstaged(
+    repo: &Repository,
+    include_ignored: bool,
+) -> Result<Vec<(String, UnstagedStatus)>> {
+    let mut out = BTreeMap::<String, UnstagedStatus>::new();
     let workdir = repo.workdir().map(ToOwned::to_owned);
-    let iter = repo
-        .status(gix::progress::Discard)
-        .context("init status")?
+    let mut platform = repo.status(gix::progress::Discard).context("init status")?;
+    platform = platform.untracked_files(gix::status::UntrackedFiles::Files);
+    if include_ignored {
+        platform = platform.dirwalk_options(|opts| opts.emit_ignored(Some(EmissionMode::Matching)));
+    }
+
+    let iter = platform
         .into_index_worktree_iter(Vec::new())
         .context("status index-worktree")?;
 
     for item in iter {
         let item = item.context("status item")?;
-        if item.summary().is_none() {
-            continue;
-        }
+
+        let status = match item {
+            gix::status::index_worktree::Item::DirectoryContents { ref entry, .. } => match entry
+                .status
+            {
+                gix_dir::entry::Status::Untracked => UnstagedStatus::Untracked,
+                gix_dir::entry::Status::Ignored(_) if include_ignored => UnstagedStatus::Ignored,
+                _ => continue,
+            },
+            _ => {
+                let Some(summary) = item.summary() else {
+                    continue;
+                };
+                use gix::status::index_worktree::iter::Summary as S;
+                let code = match summary {
+                    S::Conflict => 'U',
+                    S::Modified => 'M',
+                    S::Removed => 'D',
+                    S::TypeChange => 'T',
+                    S::IntentToAdd => 'A',
+                    S::Added => 'A',
+                    S::Renamed => 'R',
+                    S::Copied => 'C',
+                };
+                UnstagedStatus::Changed(code)
+            }
+        };
+
         let path = item.rela_path().to_str_lossy().into_owned();
         if let Some(wt) = &workdir {
             let abs = wt.join(&path);
@@ -95,32 +135,57 @@ pub fn list_unstaged_paths(repo: &Repository) -> Result<Vec<String>> {
                 continue;
             }
         }
-        out.insert(path);
+        out.insert(path, status);
     }
 
     Ok(out.into_iter().collect())
 }
 
-pub fn list_staged_paths(repo: &Repository) -> Result<Vec<String>> {
+pub fn list_unstaged_paths(repo: &Repository, include_ignored: bool) -> Result<Vec<String>> {
+    let mut out: Vec<String> = list_unstaged(repo, include_ignored)?
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect();
+    out.sort();
+    Ok(out)
+}
+
+pub fn list_staged_status(repo: &Repository) -> Result<BTreeMap<String, char>> {
     let head_tree_id = repo.head_tree_id().context("get HEAD tree id")?;
     let index = repo
         .index_or_load_from_head_or_empty()
         .context("open worktree index")?;
 
-    let mut out = BTreeSet::<String>::new();
+    let mut out = BTreeMap::<String, char>::new();
     repo.tree_index_status(
         &head_tree_id,
         &index,
         None,
         gix::status::tree_index::TrackRenames::Disabled,
         |change, _, _| {
-            out.insert(change.location().to_str_lossy().into_owned());
+            use gix::diff::index::ChangeRef as C;
+            let (path, code) = match change {
+                C::Addition { location, .. } => (location.to_str_lossy().into_owned(), 'A'),
+                C::Deletion { location, .. } => (location.to_str_lossy().into_owned(), 'D'),
+                C::Modification { location, .. } => (location.to_str_lossy().into_owned(), 'M'),
+                C::Rewrite { location, copy, .. } => (
+                    location.to_str_lossy().into_owned(),
+                    if copy { 'C' } else { 'R' },
+                ),
+            };
+            out.insert(path, code);
             Ok::<_, std::convert::Infallible>(gix::diff::index::Action::Continue)
         },
     )
     .context("tree-index status")?;
 
-    Ok(out.into_iter().collect())
+    Ok(out)
+}
+
+pub fn list_staged_paths(repo: &Repository) -> Result<Vec<String>> {
+    let mut out: Vec<String> = list_staged_status(repo)?.into_keys().collect();
+    out.sort();
+    Ok(out)
 }
 
 pub fn list_base_paths(repo: &Repository, base_ref: &str) -> Result<Vec<String>> {
@@ -232,4 +297,43 @@ pub fn try_read_tree(tree: &gix::Tree<'_>, path: &str) -> Result<Option<String>>
     Ok(Some(
         String::from_utf8_lossy(blob.data.as_ref()).to_string(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_unstaged_paths_includes_untracked_files() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let repo = gix::init(td.path()).expect("init repo");
+
+        std::fs::write(td.path().join("untracked.txt"), "hello").expect("write untracked");
+        std::fs::create_dir_all(td.path().join("dir")).expect("mkdir");
+        std::fs::write(td.path().join("dir/nested.rs"), "fn main() {}").expect("write nested");
+        std::fs::create_dir_all(td.path().join("empty-dir")).expect("mkdir empty");
+
+        let mut paths = list_unstaged_paths(&repo, false).expect("list paths");
+        paths.sort();
+
+        assert!(paths.contains(&"untracked.txt".to_string()));
+        assert!(paths.contains(&"dir/nested.rs".to_string()));
+        assert!(!paths.contains(&"dir".to_string()));
+        assert!(!paths.contains(&"empty-dir".to_string()));
+    }
+
+    #[test]
+    fn list_unstaged_paths_can_include_ignored_files() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let repo = gix::init(td.path()).expect("init repo");
+
+        std::fs::write(td.path().join(".gitignore"), "ignored.txt\n").expect("write gitignore");
+        std::fs::write(td.path().join("ignored.txt"), "nope").expect("write ignored");
+
+        let paths_hidden = list_unstaged_paths(&repo, false).expect("list paths");
+        assert!(!paths_hidden.contains(&"ignored.txt".to_string()));
+
+        let paths_shown = list_unstaged_paths(&repo, true).expect("list paths");
+        assert!(paths_shown.contains(&"ignored.txt".to_string()));
+    }
 }

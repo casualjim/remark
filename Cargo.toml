@@ -14,6 +14,7 @@ crossterm = "0.29"
 gix = { version = "0.76", features = ["revision", "tree-editor"] }
 gix-actor = "0.36"
 gix-date = "0.11"
+gix-dir = "0.18"
 gix-hash = "0.21"
 gix-object = "0.53"
 gix-ref = "0.56"
@@ -31,6 +32,9 @@ base64 = "0.22"
 unicode-width = "0.2"
 wl-clipboard-rs = "0.9"
 mimalloc = "0.1.48"
+
+[dev-dependencies]
+tempfile = "3"
 
 # The profile that 'dist' will build with
 [profile.dist]

@@ -54,10 +54,10 @@ pub fn run() -> Result<()> {
     let mut paths = match filter {
         Filter::All => {
             let mut staged = crate::git::list_staged_paths(&repo)?;
-            staged.extend(crate::git::list_unstaged_paths(&repo)?);
+            staged.extend(crate::git::list_unstaged_paths(&repo, false)?);
             staged
         }
-        Filter::Unstaged => crate::git::list_unstaged_paths(&repo)?,
+        Filter::Unstaged => crate::git::list_unstaged_paths(&repo, false)?,
         Filter::Staged => crate::git::list_staged_paths(&repo)?,
         Filter::Base => {
             let Some(base) = base_ref.clone() else {

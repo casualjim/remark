@@ -15,9 +15,10 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::{
-    CommentLocator, CommentTarget, DiffViewMode, FileChangeKind, FileEntry, FileStageKind, Focus,
-    Mode, RenderRow, SideBySideRow,
+    CommentLocator, CommentTarget, DiffViewMode, FileChangeKind, FileEntry, Focus, Mode, RenderRow,
+    SideBySideRow,
 };
+use crate::file_tree::FileTreeRow;
 use crate::git::ViewKind;
 use crate::review::{CommentState, Review};
 
@@ -70,7 +71,9 @@ pub struct DrawState<'a> {
     pub review: &'a Review,
 
     pub files: &'a [FileEntry],
+    pub file_rows: &'a [FileTreeRow],
     pub file_selected: usize,
+    pub file_row_selected: Option<usize>,
     pub file_scroll: u16,
 
     pub diff_rows: &'a [RenderRow],
@@ -129,33 +132,43 @@ fn draw_files(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
 
     let view_height = inner.height.max(1) as usize;
     let scroll = s.file_scroll as usize;
-    let end = (scroll + view_height).min(s.files.len());
+    let end = (scroll + view_height).min(s.file_rows.len());
 
     let mut items = Vec::with_capacity(end.saturating_sub(scroll));
-    for e in &s.files[scroll..end] {
-        let (st, st_color) = match e.stage {
-            FileStageKind::Staged => ("S", Color::Blue),
-            FileStageKind::Unstaged => ("U", Color::Yellow),
-            FileStageKind::Partial => ("P", Color::Magenta),
-            FileStageKind::None => (" ", Color::DarkGray),
+    for row in &s.file_rows[scroll..end] {
+        if row.is_dir {
+            items.push(ListItem::new(Line::from(vec![Span::styled(
+                row.label.clone(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )])));
+            continue;
+        }
+
+        let Some(file_index) = row.file_index else {
+            continue;
         };
-        let (tag, color) = match e.change {
-            FileChangeKind::Added => ("A", Color::Green),
-            FileChangeKind::Deleted => ("D", Color::Red),
-            FileChangeKind::Modified => ("M", Color::Yellow),
+        let Some(e) = s.files.get(file_index) else {
+            continue;
         };
+
         let state = s.review.comment_state(&e.path);
-        let (cm, cm_color) = match state {
-            CommentState::HasUnresolved => ("💬", Color::Yellow),
-            CommentState::ResolvedOnly => ("✓", Color::Green),
-            CommentState::None => (" ", Color::DarkGray),
-        };
-        items.push(ListItem::new(Line::from(vec![
-            Span::styled(format!("{st} "), Style::default().fg(st_color)),
-            Span::styled(format!("{tag} "), Style::default().fg(color)),
-            Span::styled(format!("{cm} "), Style::default().fg(cm_color)),
-            Span::raw(e.path.clone()),
-        ])));
+
+        let mut name_style = git_status_style(e.git_xy);
+        match state {
+            CommentState::HasUnresolved => {
+                name_style = name_style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+            }
+            CommentState::ResolvedOnly => {
+                name_style = name_style.add_modifier(Modifier::DIM);
+            }
+            CommentState::None => {}
+        }
+        items.push(ListItem::new(Line::from(vec![Span::styled(
+            row.label.clone(),
+            name_style,
+        )])));
     }
 
     let list = List::new(items)
@@ -163,13 +176,44 @@ fn draw_files(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
         .highlight_symbol("▸ ");
 
     let mut state = ListState::default();
-    if !s.files.is_empty() {
-        let visible_selected = s.file_selected.saturating_sub(scroll);
+    if let Some(selected_row) = s.file_row_selected {
+        let visible_selected = selected_row.saturating_sub(scroll);
         if visible_selected < view_height {
             state.select(Some(visible_selected));
         }
     }
     f.render_stateful_widget(list, inner, &mut state);
+}
+
+fn git_status_style(xy: [char; 2]) -> Style {
+    let [x, y] = xy;
+    if x == '-' && y == '-' {
+        return Style::default().fg(Color::DarkGray);
+    }
+    if y == 'N' {
+        return Style::default().fg(Color::Magenta);
+    }
+    if y == 'I' {
+        return Style::default().fg(Color::DarkGray);
+    }
+    if x == 'A' || y == 'A' {
+        return Style::default().fg(Color::Green);
+    }
+    if x == 'D' || y == 'D' {
+        return Style::default().fg(Color::Red);
+    }
+    if x == 'R' || y == 'R' || x == 'C' || y == 'C' {
+        return Style::default().fg(Color::Cyan);
+    }
+    if x == 'T' || y == 'T' {
+        return Style::default().fg(Color::Blue);
+    }
+    if x == 'U' || y == 'U' {
+        return Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
+    }
+    Style::default().fg(Color::Yellow)
 }
 
 fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {

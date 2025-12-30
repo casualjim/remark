@@ -7,6 +7,7 @@ use crossterm::event::{
 };
 use gix::ObjectId;
 
+use crate::file_tree::FileTreeView;
 use crate::git::ViewKind;
 use crate::highlight::Highlighter;
 use crate::review::{FileReview, LineSide, Review};
@@ -18,12 +19,14 @@ const DEFAULT_NOTES_REF: &str = "refs/notes/remark";
 struct Config {
     notes_ref: String,
     base_ref: Option<String>,
+    show_ignored: bool,
 }
 
 impl Config {
     fn from_env(repo: &gix::Repository) -> Self {
         let mut notes_ref = DEFAULT_NOTES_REF.to_string();
         let mut base_ref: Option<String> = crate::git::default_base_ref(repo);
+        let mut show_ignored = false;
 
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -38,6 +41,9 @@ impl Config {
                         base_ref = Some(v);
                     }
                 }
+                "--ignored" => {
+                    show_ignored = true;
+                }
                 "-h" | "--help" => {
                     print_help_and_exit();
                 }
@@ -48,13 +54,14 @@ impl Config {
         Self {
             notes_ref,
             base_ref,
+            show_ignored,
         }
     }
 }
 
 fn print_help_and_exit() -> ! {
     eprintln!(
-        "remark\n\nUSAGE:\n  remark [--ref <notes-ref>] [--base <ref>]\n\nOPTIONS:\n  --ref <notes-ref>   Notes ref to store reviews (default: {DEFAULT_NOTES_REF})\n  --base <ref>        Base ref for base view (default: @{{upstream}} / main / master)\n\nKEYS (browse):\n  Tab / Shift+Tab     focus files/diff\n  1/2/3/4             all/unstaged/staged/base\n  i                   toggle unified/side-by-side diff\n  R                   reload file list\n  Up/Down             navigate (focused pane)\n  PgUp/PgDn           scroll (focused pane)\n  Enter               focus diff (from files)\n  c                   add/edit comment (file or line)\n  d                   delete comment (file or line)\n  r                   resolve/unresolve comment\n  p                   preview collated prompt\n  y                   copy prompt to clipboard (when open)\n  ?                   help\n  q / Q               quit\n\nKEYS (comment editor):\n  Enter               newline\n  Ctrl+S / F2         accept comment and move on\n  Esc                 cancel\n"
+        "remark\n\nUSAGE:\n  remark [--ref <notes-ref>] [--base <ref>] [--ignored]\n\nOPTIONS:\n  --ref <notes-ref>   Notes ref to store reviews (default: {DEFAULT_NOTES_REF})\n  --base <ref>        Base ref for base view (default: @{{upstream}} / main / master)\n  --ignored           Include gitignored files in the file list\n\nKEYS (browse):\n  Tab / Shift+Tab     focus files/diff\n  1/2/3/4             all/unstaged/staged/base\n  i                   toggle unified/side-by-side diff\n  I                   toggle showing ignored files\n  R                   reload file list\n  Up/Down             navigate (focused pane)\n  PgUp/PgDn           scroll (focused pane)\n  Enter               focus diff (from files)\n  c                   add/edit comment (file or line)\n  d                   delete comment (file or line)\n  r                   resolve/unresolve comment\n  p                   preview collated prompt\n  y                   copy prompt to clipboard (when open)\n  ?                   help\n  q / Q               quit\n\nKEYS (comment editor):\n  Enter               newline\n  Ctrl+S / F2         accept comment and move on\n  Esc                 cancel\n"
     );
     std::process::exit(2);
 }
@@ -128,7 +135,7 @@ pub fn run() -> Result<()> {
 
     let mut ui = crate::ui::Ui::new()?;
 
-    let mut app = App::new(repo, config.notes_ref, config.base_ref)?;
+    let mut app = App::new(repo, config.notes_ref, config.base_ref, config.show_ignored)?;
     let res = app.run_loop(&mut ui);
 
     ui.restore().ok();
@@ -139,6 +146,7 @@ struct App {
     repo: gix::Repository,
     notes_ref: String,
     base_ref: Option<String>,
+    show_ignored: bool,
 
     view: ViewKind,
     focus: Focus,
@@ -149,6 +157,7 @@ struct App {
     review: Review,
 
     files: Vec<FileEntry>,
+    file_tree: FileTreeView,
     file_selected: usize,
     file_scroll: u16,
     files_viewport_height: u16,
@@ -179,28 +188,26 @@ pub(crate) enum FileChangeKind {
     Deleted,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FileStageKind {
-    None,
-    Staged,
-    Unstaged,
-    Partial,
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct FileEntry {
     pub(crate) path: String,
     pub(crate) change: FileChangeKind,
-    pub(crate) stage: FileStageKind,
+    pub(crate) git_xy: [char; 2],
 }
 
 impl App {
-    fn new(repo: gix::Repository, notes_ref: String, base_ref: Option<String>) -> Result<Self> {
+    fn new(
+        repo: gix::Repository,
+        notes_ref: String,
+        base_ref: Option<String>,
+        show_ignored: bool,
+    ) -> Result<Self> {
         let highlighter = Highlighter::new()?;
         let mut app = Self {
             repo,
             notes_ref,
             base_ref,
+            show_ignored,
             view: ViewKind::All,
             focus: Focus::Files,
             mode: Mode::Browse,
@@ -208,6 +215,7 @@ impl App {
             head_commit_oid: None,
             review: Review::new(),
             files: Vec::new(),
+            file_tree: FileTreeView::default(),
             file_selected: 0,
             file_scroll: 0,
             files_viewport_height: 1,
@@ -265,7 +273,9 @@ impl App {
                             diff_view_mode: self.diff_view_mode,
                             review: &self.review,
                             files: &self.files,
+                            file_rows: &self.file_tree.rows,
                             file_selected: self.file_selected,
+                            file_row_selected: self.file_tree.selected_row(self.file_selected),
                             file_scroll: self.file_scroll,
                             diff_rows: &self.diff_rows,
                             diff_cursor: self.diff_cursor,
@@ -315,11 +325,23 @@ impl App {
     }
 
     fn handle_browse_key(&mut self, key: KeyEvent) -> Result<bool> {
-        if key.modifiers.is_empty() {
+        let no_ctrl_alt = !key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::ALT);
+        if no_ctrl_alt {
             match key.code {
                 KeyCode::Char('Q') => return Ok(true),
                 KeyCode::Char('q') => {
                     return Ok(true);
+                }
+                KeyCode::Char('I') => {
+                    self.show_ignored = !self.show_ignored;
+                    self.reload_file_list()?;
+                    self.status = if self.show_ignored {
+                        "Showing ignored files".to_string()
+                    } else {
+                        "Hiding ignored files".to_string()
+                    };
+                    return Ok(false);
                 }
                 _ => {}
             }
@@ -366,7 +388,7 @@ impl App {
             KeyCode::Char('3') => self.try_set_view(ViewKind::Staged)?,
             KeyCode::Char('4') => self.try_set_view(ViewKind::Base)?,
             KeyCode::Char('i') if key.modifiers.is_empty() => self.toggle_diff_view_mode()?,
-            KeyCode::Char('R') if key.modifiers.is_empty() => self.reload_file_list()?,
+            KeyCode::Char('R') if no_ctrl_alt => self.reload_file_list()?,
             _ => match self.focus {
                 Focus::Files => self.handle_files_key(key)?,
                 Focus::Diff => self.handle_diff_key(key)?,
@@ -490,9 +512,9 @@ impl App {
                 if rects.files.contains((m.column, m.row).into()) {
                     self.focus = Focus::Files;
                     let inner_y = m.row.saturating_sub(rects.files.y + 1) as usize;
-                    let idx = self.file_scroll as usize + inner_y;
-                    if idx < self.files.len() {
-                        self.file_selected = idx;
+                    let row_idx = self.file_scroll as usize + inner_y;
+                    if let Some(file_index) = self.file_tree.file_at_row(row_idx) {
+                        self.file_selected = file_index;
                         self.reload_diff_for_selected()?;
                     }
                 } else if rects.diff.contains((m.column, m.row).into()) {
@@ -559,10 +581,14 @@ impl App {
         self.head_commit_oid = crate::git::head_commit_oid(&self.repo).ok();
 
         self.files = self.list_files_for_view()?;
+        self.file_tree = FileTreeView::build(&self.files);
         if self.view == ViewKind::Base && self.base_ref.is_none() {
             self.diff_rows.clear();
             self.review = Review::new();
             self.review.files.clear();
+            self.file_selected = 0;
+            self.file_scroll = 0;
+            self.file_tree = FileTreeView::default();
             return Ok(());
         }
         if self.files.is_empty() {
@@ -570,6 +596,9 @@ impl App {
             self.status = "No changes".to_string();
             self.review = Review::new();
             self.review.files.clear();
+            self.file_selected = 0;
+            self.file_scroll = 0;
+            self.file_tree = FileTreeView::default();
             return Ok(());
         }
 
@@ -634,12 +663,16 @@ impl App {
 
         self.head_commit_oid = crate::git::head_commit_oid(&self.repo).ok();
         self.files = self.list_files_for_view()?;
+        self.file_tree = FileTreeView::build(&self.files);
 
         if self.view == ViewKind::Base && self.base_ref.is_none() {
             self.diff_rows.clear();
             self.review = Review::new();
             self.review.files.clear();
             self.status = "No base ref set (pass --base <ref>)".to_string();
+            self.file_selected = 0;
+            self.file_scroll = 0;
+            self.file_tree = FileTreeView::default();
             return Ok(());
         }
         if self.files.is_empty() {
@@ -649,6 +682,7 @@ impl App {
             self.status = "No changes".to_string();
             self.file_selected = 0;
             self.file_scroll = 0;
+            self.file_tree = FileTreeView::default();
             self.diff_cursor = 0;
             self.diff_scroll = 0;
             return Ok(());
@@ -663,6 +697,8 @@ impl App {
         } else {
             self.file_selected = self.file_selected.min(self.files.len().saturating_sub(1));
         }
+        // Ensure the tree mapping is up-to-date for the selected file.
+        self.file_tree = FileTreeView::build(&self.files);
 
         // Rebuild an in-memory view of notes (in case an external process edited notes).
         self.review = Review::new();
@@ -766,30 +802,42 @@ impl App {
     }
 
     fn list_files_for_view(&self) -> Result<Vec<FileEntry>> {
-        let (mut paths, staged_set, unstaged_set) = match self.view {
+        let (paths, staged_status, unstaged_status) = match self.view {
             ViewKind::All => {
-                let staged = crate::git::list_staged_paths(&self.repo)?;
-                let unstaged = crate::git::list_unstaged_paths(&self.repo)?;
+                let staged_status = crate::git::list_staged_status(&self.repo)?;
+                let unstaged_vec = crate::git::list_unstaged(&self.repo, self.show_ignored)?;
 
-                let staged_set: std::collections::BTreeSet<String> =
-                    staged.iter().cloned().collect();
-                let unstaged_set: std::collections::BTreeSet<String> =
-                    unstaged.iter().cloned().collect();
+                let mut unstaged_status = std::collections::BTreeMap::new();
+                for (p, st) in unstaged_vec {
+                    unstaged_status.insert(p, st);
+                }
 
-                let mut out = staged;
-                out.extend(unstaged);
-                (out, staged_set, unstaged_set)
+                let mut paths: Vec<String> = staged_status
+                    .keys()
+                    .cloned()
+                    .chain(unstaged_status.keys().cloned())
+                    .collect();
+                paths.sort();
+                paths.dedup();
+
+                (paths, staged_status, unstaged_status)
             }
-            ViewKind::Unstaged => (
-                crate::git::list_unstaged_paths(&self.repo)?,
-                Default::default(),
-                Default::default(),
-            ),
-            ViewKind::Staged => (
-                crate::git::list_staged_paths(&self.repo)?,
-                Default::default(),
-                Default::default(),
-            ),
+            ViewKind::Unstaged => {
+                let unstaged_vec = crate::git::list_unstaged(&self.repo, self.show_ignored)?;
+                let mut unstaged_status = std::collections::BTreeMap::new();
+                for (p, st) in unstaged_vec {
+                    unstaged_status.insert(p, st);
+                }
+                let mut paths: Vec<String> = unstaged_status.keys().cloned().collect();
+                paths.sort();
+                (paths, Default::default(), unstaged_status)
+            }
+            ViewKind::Staged => {
+                let staged_status = crate::git::list_staged_status(&self.repo)?;
+                let mut paths: Vec<String> = staged_status.keys().cloned().collect();
+                paths.sort();
+                (paths, staged_status, Default::default())
+            }
             ViewKind::Base => {
                 let Some(base) = &self.base_ref else {
                     return Ok(Vec::new());
@@ -801,9 +849,6 @@ impl App {
                 )
             }
         };
-
-        paths.sort();
-        paths.dedup();
 
         let base_tree = if self.view == ViewKind::Base {
             self.base_ref
@@ -822,21 +867,40 @@ impl App {
                 (true, false) => FileChangeKind::Deleted,
                 _ => FileChangeKind::Modified,
             };
-            let stage = match self.view {
-                ViewKind::All => match (staged_set.contains(&path), unstaged_set.contains(&path)) {
-                    (true, true) => FileStageKind::Partial,
-                    (true, false) => FileStageKind::Staged,
-                    (false, true) => FileStageKind::Unstaged,
-                    (false, false) => FileStageKind::None,
+
+            let git_xy = match self.view {
+                ViewKind::All => {
+                    let x = staged_status.get(&path).copied().unwrap_or('-');
+                    match unstaged_status.get(&path) {
+                        Some(crate::git::UnstagedStatus::Untracked) => ['-', 'N'],
+                        Some(crate::git::UnstagedStatus::Ignored) => ['-', 'I'],
+                        Some(crate::git::UnstagedStatus::Changed(y)) => [x, *y],
+                        None => [x, '-'],
+                    }
+                }
+                ViewKind::Unstaged => match unstaged_status.get(&path) {
+                    Some(crate::git::UnstagedStatus::Untracked) => ['-', 'N'],
+                    Some(crate::git::UnstagedStatus::Ignored) => ['-', 'I'],
+                    Some(crate::git::UnstagedStatus::Changed(y)) => ['-', *y],
+                    None => ['-', '-'],
                 },
-                ViewKind::Unstaged => FileStageKind::Unstaged,
-                ViewKind::Staged => FileStageKind::Staged,
-                ViewKind::Base => FileStageKind::None,
+                ViewKind::Staged => {
+                    let x = staged_status.get(&path).copied().unwrap_or('-');
+                    [x, '-']
+                }
+                ViewKind::Base => {
+                    let x = match change {
+                        FileChangeKind::Added => 'A',
+                        FileChangeKind::Deleted => 'D',
+                        FileChangeKind::Modified => 'M',
+                    };
+                    [x, '-']
+                }
             };
             out.push(FileEntry {
                 path,
                 change,
-                stage,
+                git_xy,
             });
         }
         Ok(out)
@@ -950,16 +1014,18 @@ impl App {
         if self.files.is_empty() {
             self.file_scroll = 0;
             self.file_selected = 0;
+            self.file_tree = FileTreeView::default();
             return;
         }
         let viewport_height = viewport_height.max(1) as usize;
+        let selected_row = self.file_tree.selected_row(self.file_selected).unwrap_or(0);
         let scroll = self.file_scroll as usize;
-        if self.file_selected < scroll {
-            self.file_scroll = self.file_selected as u16;
+        if selected_row < scroll {
+            self.file_scroll = selected_row as u16;
             return;
         }
-        if self.file_selected >= scroll + viewport_height {
-            self.file_scroll = (self.file_selected + 1 - viewport_height) as u16;
+        if selected_row >= scroll + viewport_height {
+            self.file_scroll = (selected_row + 1 - viewport_height) as u16;
         }
     }
 

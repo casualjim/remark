@@ -3136,6 +3136,7 @@ dependencies = [
  "gix-actor",
  "gix-date",
  "gix-diff",
+ "gix-dir",
  "gix-hash",
  "gix-object",
  "gix-ref",
@@ -3148,6 +3149,7 @@ dependencies = [
  "syntastica",
  "syntastica-parsers",
  "syntastica-themes",
+ "tempfile",
  "unicode-width 0.2.2",
  "wl-clipboard-rs",
 ]

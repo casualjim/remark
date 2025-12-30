@@ -1,6 +1,7 @@
 mod app;
 mod clipboard;
 mod diff;
+mod file_tree;
 mod git;
 mod highlight;
 mod notes;
