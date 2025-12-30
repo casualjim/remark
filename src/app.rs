@@ -161,6 +161,7 @@ struct App {
     file_selected: usize,
     file_scroll: u16,
     files_viewport_height: u16,
+    manual_scroll: bool,
 
     diff_rows: Vec<RenderRow>,
     diff_cursor: usize,
@@ -219,6 +220,7 @@ impl App {
             file_selected: 0,
             file_scroll: 0,
             files_viewport_height: 1,
+            manual_scroll: false,
             diff_rows: Vec::new(),
             diff_cursor: 0,
             diff_scroll: 0,
@@ -257,9 +259,11 @@ impl App {
             self.diff_viewport_height = rects.diff.height.saturating_sub(2).max(1);
             self.diff_viewport_width = rects.diff.width.saturating_sub(2).max(1);
             self.recompute_diff_metrics(self.diff_viewport_width);
-            self.ensure_file_visible(self.files_viewport_height);
+            if !self.manual_scroll {
+                self.ensure_file_visible(self.files_viewport_height);
+                self.ensure_diff_visible(self.diff_viewport_height);
+            }
             self.clamp_file_scroll();
-            self.ensure_diff_visible(self.diff_viewport_height);
             self.clamp_diff_scroll();
 
             ui.terminal
@@ -326,6 +330,9 @@ impl App {
     }
 
     fn handle_browse_key(&mut self, key: KeyEvent) -> Result<bool> {
+        // Keyboard interaction implies "cursor-following" again.
+        self.manual_scroll = false;
+
         let no_ctrl_alt = !key.modifiers.contains(KeyModifiers::CONTROL)
             && !key.modifiers.contains(KeyModifiers::ALT);
         if no_ctrl_alt {
@@ -511,6 +518,7 @@ impl App {
         let pos = (m.column, m.row).into();
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                self.manual_scroll = false;
                 if rects.files.contains(pos) {
                     self.focus = Focus::Files;
                     let inner_y = m.row.saturating_sub(rects.files.y + 1) as usize;
@@ -534,6 +542,7 @@ impl App {
                 }
             }
             MouseEventKind::ScrollUp => {
+                self.manual_scroll = true;
                 if rects.files.contains(pos) {
                     self.file_scroll = self.file_scroll.saturating_sub(3);
                     self.clamp_file_scroll();
@@ -554,6 +563,7 @@ impl App {
                 }
             }
             MouseEventKind::ScrollDown => {
+                self.manual_scroll = true;
                 if rects.files.contains(pos) {
                     self.file_scroll = self.file_scroll.saturating_add(3);
                     self.clamp_file_scroll();
@@ -591,6 +601,7 @@ impl App {
     fn reload_view(&mut self) -> Result<()> {
         self.mode = Mode::Browse;
         self.focus = Focus::Files;
+        self.manual_scroll = false;
         self.show_help = false;
         self.show_prompt = false;
         self.status.clear();
@@ -694,6 +705,7 @@ impl App {
     fn reload_file_list(&mut self) -> Result<()> {
         let keep_path = self.files.get(self.file_selected).map(|e| e.path.clone());
         let keep_line = self.keep_cursor_line();
+        self.manual_scroll = false;
 
         self.head_commit_oid = crate::git::head_commit_oid(&self.repo).ok();
         self.files = self.list_files_for_view()?;
