@@ -258,6 +258,7 @@ impl App {
             self.diff_viewport_width = rects.diff.width.saturating_sub(2).max(1);
             self.recompute_diff_metrics(self.diff_viewport_width);
             self.ensure_file_visible(self.files_viewport_height);
+            self.clamp_file_scroll();
             self.ensure_diff_visible(self.diff_viewport_height);
             self.clamp_diff_scroll();
 
@@ -507,9 +508,10 @@ impl App {
             return Ok(());
         }
 
+        let pos = (m.column, m.row).into();
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if rects.files.contains((m.column, m.row).into()) {
+                if rects.files.contains(pos) {
                     self.focus = Focus::Files;
                     let inner_y = m.row.saturating_sub(rects.files.y + 1) as usize;
                     let row_idx = self.file_scroll as usize + inner_y;
@@ -517,7 +519,7 @@ impl App {
                         self.file_selected = file_index;
                         self.reload_diff_for_selected()?;
                     }
-                } else if rects.diff.contains((m.column, m.row).into()) {
+                } else if rects.diff.contains(pos) {
                     self.focus = Focus::Diff;
                     let inner_y = m.row.saturating_sub(rects.diff.y + 1) as usize;
                     let visual = self.diff_scroll as u32 + inner_y as u32;
@@ -531,14 +533,46 @@ impl App {
                     }
                 }
             }
-            MouseEventKind::ScrollUp => match self.focus {
-                Focus::Files => self.file_scroll = self.file_scroll.saturating_sub(3),
-                Focus::Diff => self.diff_scroll = self.diff_scroll.saturating_sub(3),
-            },
-            MouseEventKind::ScrollDown => match self.focus {
-                Focus::Files => self.file_scroll = self.file_scroll.saturating_add(3),
-                Focus::Diff => self.diff_scroll = self.diff_scroll.saturating_add(3),
-            },
+            MouseEventKind::ScrollUp => {
+                if rects.files.contains(pos) {
+                    self.file_scroll = self.file_scroll.saturating_sub(3);
+                    self.clamp_file_scroll();
+                } else if rects.diff.contains(pos) {
+                    self.diff_scroll = self.diff_scroll.saturating_sub(3);
+                    self.clamp_diff_scroll();
+                } else {
+                    match self.focus {
+                        Focus::Files => {
+                            self.file_scroll = self.file_scroll.saturating_sub(3);
+                            self.clamp_file_scroll();
+                        }
+                        Focus::Diff => {
+                            self.diff_scroll = self.diff_scroll.saturating_sub(3);
+                            self.clamp_diff_scroll();
+                        }
+                    }
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                if rects.files.contains(pos) {
+                    self.file_scroll = self.file_scroll.saturating_add(3);
+                    self.clamp_file_scroll();
+                } else if rects.diff.contains(pos) {
+                    self.diff_scroll = self.diff_scroll.saturating_add(3);
+                    self.clamp_diff_scroll();
+                } else {
+                    match self.focus {
+                        Focus::Files => {
+                            self.file_scroll = self.file_scroll.saturating_add(3);
+                            self.clamp_file_scroll();
+                        }
+                        Focus::Diff => {
+                            self.diff_scroll = self.diff_scroll.saturating_add(3);
+                            self.clamp_diff_scroll();
+                        }
+                    }
+                }
+            }
             _ => {}
         }
 
@@ -1084,6 +1118,19 @@ impl App {
             .min(u16::MAX as u32);
         if (self.diff_scroll as u32) > max_scroll {
             self.diff_scroll = max_scroll as u16;
+        }
+    }
+
+    fn clamp_file_scroll(&mut self) {
+        if self.file_tree.rows.is_empty() {
+            self.file_scroll = 0;
+            return;
+        }
+        let viewport = self.files_viewport_height.max(1) as u32;
+        let total = self.file_tree.rows.len() as u32;
+        let max_scroll = total.saturating_sub(viewport).min(u16::MAX as u32);
+        if (self.file_scroll as u32) > max_scroll {
+            self.file_scroll = max_scroll as u16;
         }
     }
 
