@@ -332,7 +332,7 @@ pub fn render_prompt(review: &Review) -> String {
     let mut wrote_any = false;
 
     out.push_str(
-        "# Review Notes (unresolved)\n\n\
+        "# Review Notes\n\n\
 These notes are grouped by file. Every comment belongs to the file section it appears under.\n\n",
     );
 

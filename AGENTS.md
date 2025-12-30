@@ -38,6 +38,7 @@
 - Commit messages follow Conventional Commits (examples: `feat: ...`, `fix: ...`, `chore: ...`, `refactor: ...`, `test: ...`).
 - PRs should include: a clear description, rationale, and any user-facing behavior changes.
 - Ensure CI passes (`fmt`, `clippy`, `test`) before merging.
+- CRITICAL: Do not create commits unless the user explicitly asks. Always confirm before staging or committing changes.
 
 ## Release Notes (Maintainers)
 

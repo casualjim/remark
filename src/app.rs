@@ -61,7 +61,7 @@ impl Config {
 
 fn print_help_and_exit() -> ! {
     eprintln!(
-        "remark\n\nUSAGE:\n  remark [--ref <notes-ref>] [--base <ref>] [--ignored]\n\nOPTIONS:\n  --ref <notes-ref>   Notes ref to store reviews (default: {DEFAULT_NOTES_REF})\n  --base <ref>        Base ref for base view (default: @{{upstream}} / main / master)\n  --ignored           Include gitignored files in the file list\n\nKEYS (browse):\n  Tab / Shift+Tab     focus files/diff\n  1/2/3/4             all/unstaged/staged/base\n  i                   toggle unified/side-by-side diff\n  I                   toggle showing ignored files\n  R                   reload file list\n  Up/Down             navigate (focused pane)\n  PgUp/PgDn           scroll (focused pane)\n  Enter               focus diff (from files)\n  c                   add/edit comment (file or line)\n  d                   delete comment (file or line)\n  r                   resolve/unresolve comment\n  p                   preview collated prompt\n  y                   copy prompt to clipboard (when open)\n  ?                   help\n  q / Q               quit\n\nKEYS (comment editor):\n  Enter               newline\n  Ctrl+S / F2         accept comment and move on\n  Esc                 cancel\n"
+        "remark\n\nUSAGE:\n  remark [--ref <notes-ref>] [--base <ref>] [--ignored]\n\nOPTIONS:\n  --ref <notes-ref>   Notes ref to store reviews (default: {DEFAULT_NOTES_REF})\n  --base <ref>        Base ref for base view (default: @{{upstream}} / main / master)\n  --ignored           Include gitignored files in the file list\n\nKEYS (browse):\n  Tab / Shift+Tab     focus files/diff\n  1/2/3/4             all/unstaged/staged/base\n  i                   toggle unified/side-by-side diff\n  I                   toggle showing ignored files\n  R                   reload file list\n  Up/Down             navigate (focused pane)\n  PgUp/PgDn           scroll (focused pane)\n  Enter               focus diff (from files)\n  c                   add/edit comment (file or line)\n  d                   delete comment (file or line)\n  r                   resolve/unresolve comment\n  p                   preview collated prompt\n  y                   copy prompt to clipboard (when open)\n  ?                   help\n  q / Q               quit\n\nTIP:\n  With focus on Files, press `c` to add/edit a file-level comment for the selected file.\n\nKEYS (comment editor):\n  Enter               newline\n  Ctrl+S / F2         accept comment and move on\n  Esc                 cancel\n"
     );
     std::process::exit(2);
 }
@@ -413,9 +413,16 @@ impl App {
             KeyCode::Down => self.select_file(1)?,
             KeyCode::PageUp => self.select_file(-page)?,
             KeyCode::PageDown => self.select_file(page)?,
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.select_file(-page)?
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.select_file(page)?
+            }
             KeyCode::Enter => {
                 self.focus = Focus::Diff;
             }
+            KeyCode::Char('c') if key.modifiers.is_empty() => self.begin_file_comment()?,
             _ => {}
         }
         Ok(())
@@ -428,9 +435,15 @@ impl App {
             KeyCode::Down => self.move_diff_cursor(1),
             KeyCode::PageUp => self.move_diff_cursor(-page),
             KeyCode::PageDown => self.move_diff_cursor(page),
-            KeyCode::Char('c') => self.begin_comment()?,
-            KeyCode::Char('d') => self.delete_comment()?,
-            KeyCode::Char('r') => self.toggle_resolved()?,
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_diff_cursor(-page)
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_diff_cursor(page)
+            }
+            KeyCode::Char('c') if key.modifiers.is_empty() => self.begin_comment()?,
+            KeyCode::Char('d') if key.modifiers.is_empty() => self.delete_comment()?,
+            KeyCode::Char('r') if key.modifiers.is_empty() => self.toggle_resolved()?,
             _ => {}
         }
         Ok(())
@@ -1296,6 +1309,21 @@ impl App {
             self.status = "Not a commentable line".to_string();
             return Ok(());
         };
+        self.begin_comment_for_target(target)
+    }
+
+    fn begin_file_comment(&mut self) -> Result<()> {
+        let Some(path) = self.files.get(self.file_selected).map(|e| e.path.clone()) else {
+            self.status = "No file selected".to_string();
+            return Ok(());
+        };
+        self.begin_comment_for_target(CommentTarget {
+            path,
+            locator: CommentLocator::File,
+        })
+    }
+
+    fn begin_comment_for_target(&mut self, target: CommentTarget) -> Result<()> {
         let existing = match target.locator {
             CommentLocator::File => self
                 .review
