@@ -331,42 +331,49 @@ pub fn render_prompt(review: &Review) -> String {
 
     let mut wrote_any = false;
 
+    out.push_str(
+        "# Review Notes (unresolved)\n\n\
+These notes are grouped by file. Every comment belongs to the file section it appears under.\n\n",
+    );
+
     for (path, f) in &review.files {
-        let has_unresolved = f
-            .file_comment
-            .as_ref()
-            .map(|c| !c.resolved && !c.body.trim().is_empty())
-            .unwrap_or(false)
-            || f.comments
-                .values()
-                .any(|c| !c.resolved && !c.body.trim().is_empty());
-        if !has_unresolved {
-            continue;
-        }
-        wrote_any = true;
-        out.push_str(&format!("## {path}\n"));
-        if let Some(fc) = f
+        let file_comment = f
             .file_comment
             .as_ref()
             .filter(|c| !c.resolved)
             .map(|c| c.body.trim_end())
-            .filter(|s| !s.is_empty())
-        {
-            out.push_str(&format!("- File: {fc}\n"));
+            .filter(|s| !s.is_empty());
+
+        let line_comments = f
+            .comments
+            .iter()
+            .filter(|(_, c)| !c.resolved && !c.body.trim().is_empty())
+            .map(|(k, c)| (k, c.body.trim_end()))
+            .collect::<Vec<_>>();
+
+        if file_comment.is_none() && line_comments.is_empty() {
+            continue;
         }
-        for (line, comment) in &f.comments {
-            if comment.resolved {
-                continue;
+
+        wrote_any = true;
+        out.push_str(&format!("## {path}\n"));
+
+        if let Some(fc) = file_comment {
+            out.push_str("### File comment\n");
+            push_fenced_block(&mut out, fc);
+            out.push('\n');
+        }
+
+        if !line_comments.is_empty() {
+            out.push_str("### Line comments\n");
+            for (line, comment) in line_comments {
+                let side = match line.side {
+                    LineSide::Old => "old",
+                    LineSide::New => "new",
+                };
+                out.push_str(&format!("- {side}:{}\n", line.line));
+                push_fenced_block(&mut out, comment);
             }
-            let comment = comment.body.trim_end();
-            if comment.is_empty() {
-                continue;
-            }
-            let side = match line.side {
-                LineSide::Old => "old",
-                LineSide::New => "new",
-            };
-            out.push_str(&format!("- Line {} ({side}): {comment}\n", line.line));
         }
         out.push('\n');
     }
@@ -376,6 +383,23 @@ pub fn render_prompt(review: &Review) -> String {
         return out;
     }
     out
+}
+
+fn push_fenced_block(out: &mut String, text: &str) {
+    let mut ticks = 3usize;
+    loop {
+        let fence = "`".repeat(ticks);
+        if !text.contains(&fence) {
+            out.push_str(&format!("{fence}text\n"));
+            out.push_str(text);
+            if !text.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(&format!("{fence}\n"));
+            return;
+        }
+        ticks += 1;
+    }
 }
 
 #[cfg(test)]
@@ -525,8 +549,9 @@ mod tests {
         assert!(!p.contains("Target:"));
         assert!(!p.contains("Base:"));
         assert!(p.contains("## a.rs"));
-        assert!(p.contains("Line 10 (new): Fix this"));
-        assert!(!p.contains("File: File todo"));
+        assert!(p.contains("- new:10"));
+        assert!(p.contains("Fix this"));
+        assert!(!p.contains("File todo"));
         assert!(!p.contains("Restore this"));
         assert!(!p.contains("## b.rs"));
         assert!(!p.contains("## TODOs"));
@@ -563,7 +588,8 @@ mod tests {
         r.set_file_comment("a.rs", "Do thing".to_string());
         let p = render_prompt(&r);
         assert!(p.contains("## a.rs"));
-        assert!(p.contains("File: Do thing"));
+        assert!(p.contains("### File comment"));
+        assert!(p.contains("Do thing"));
         assert!(!p.contains("## TODOs"));
     }
 }
