@@ -36,6 +36,53 @@ pub fn default_base_ref(repo: &Repository) -> Option<String> {
         })
 }
 
+pub fn read_local_config_value(repo: &Repository, key: &str) -> Result<Option<String>> {
+    let path = repo.git_dir().join("config");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let config = gix::config::File::from_path_no_includes(path, gix::config::Source::Local)
+        .context("read local git config")?;
+    let value = match config.raw_value(key) {
+        Ok(v) => v.to_str().ok().map(|s| s.to_string()),
+        Err(_) => None,
+    };
+    Ok(value)
+}
+
+pub fn write_local_config_value(repo: &Repository, key: &str, value: &str) -> Result<()> {
+    let path = repo.git_dir().join("config");
+    let mut config = if path.exists() {
+        gix::config::File::from_path_no_includes(path.clone(), gix::config::Source::Local)
+            .context("read local git config")?
+    } else {
+        let mut buf = Vec::new();
+        let meta = gix::config::file::Metadata::from(gix::config::Source::Local).at(path.clone());
+        gix::config::File::from_bytes_owned(&mut buf, meta, Default::default())
+            .context("init local git config")?
+    };
+
+    let (section, value_name) = split_config_key(key)?;
+    config
+        .set_raw_value_by(section, None, value_name.to_string(), value)
+        .context("set local git config value")?;
+
+    let mut out = Vec::new();
+    config.write_to(&mut out).context("serialize git config")?;
+    std::fs::write(&path, out).with_context(|| format!("write {}", path.display()))?;
+    Ok(())
+}
+
+fn split_config_key(key: &str) -> Result<(&str, &str)> {
+    let Some((section, value)) = key.split_once('.') else {
+        return Err(anyhow::anyhow!("invalid config key: {key}"));
+    };
+    if section.is_empty() || value.is_empty() {
+        return Err(anyhow::anyhow!("invalid config key: {key}"));
+    }
+    Ok((section, value))
+}
+
 pub fn head_commit_oid(repo: &Repository) -> Result<ObjectId> {
     Ok(repo.head_commit().context("read HEAD commit")?.id)
 }

@@ -71,6 +71,8 @@ pub struct FileReview {
     pub file_comment: Option<Comment>,
     #[serde(default)]
     pub comments: BTreeMap<LineKey, Comment>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub reviewed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,7 +100,7 @@ impl Review {
                 resolved,
             });
         }
-        if f.file_comment.is_none() && f.comments.is_empty() {
+        if f.file_comment.is_none() && f.comments.is_empty() && !f.reviewed {
             self.files.remove(path);
         }
     }
@@ -112,7 +114,7 @@ impl Review {
             return false;
         };
         let removed = f.file_comment.take().is_some();
-        if f.file_comment.is_none() && f.comments.is_empty() {
+        if f.file_comment.is_none() && f.comments.is_empty() && !f.reviewed {
             self.files.remove(path);
         }
         removed
@@ -152,7 +154,7 @@ impl Review {
                 },
             );
         }
-        if f.file_comment.is_none() && f.comments.is_empty() {
+        if f.file_comment.is_none() && f.comments.is_empty() && !f.reviewed {
             self.files.remove(path);
         }
     }
@@ -177,7 +179,7 @@ impl Review {
                 line: line_1_based,
             })
             .is_some();
-        if f.file_comment.is_none() && f.comments.is_empty() {
+        if f.file_comment.is_none() && f.comments.is_empty() && !f.reviewed {
             self.files.remove(path);
         }
         removed
@@ -215,8 +217,10 @@ impl Review {
         });
         let mut changed = f.comments.len() != before;
 
-        if f.file_comment.is_none() && f.comments.is_empty() && self.files.remove(path).is_some() {
-            changed = true;
+        if f.file_comment.is_none() && f.comments.is_empty() && !f.reviewed {
+            if self.files.remove(path).is_some() {
+                changed = true;
+            }
         }
 
         changed
@@ -316,6 +320,7 @@ pub fn decode_file_note(note: &str) -> Option<FileReview> {
                         )
                     })
                     .collect(),
+                reviewed: false,
             });
         }
     }
@@ -402,6 +407,10 @@ fn push_fenced_block(out: &mut String, text: &str) {
     }
 }
 
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,6 +442,7 @@ mod tests {
                 body: "file-level".to_string(),
                 resolved: true,
             }),
+            reviewed: true,
             ..Default::default()
         };
         fr.comments.insert(
@@ -463,6 +473,7 @@ mod tests {
             "file-level".to_string()
         );
         assert!(decoded.file_comment.as_ref().unwrap().resolved);
+        assert!(decoded.reviewed);
         assert_eq!(decoded.comments.len(), 2);
         assert_eq!(
             decoded

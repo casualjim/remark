@@ -14,6 +14,7 @@ use crate::review::{FileReview, LineSide, Review};
 use unicode_width::UnicodeWidthStr;
 
 const DEFAULT_NOTES_REF: &str = "refs/notes/remark";
+const CONFIG_DIFF_VIEW_KEY: &str = "remark.diffView";
 
 #[derive(Debug, Clone)]
 struct Config {
@@ -61,7 +62,7 @@ impl Config {
 
 fn print_help_and_exit() -> ! {
     eprintln!(
-        "remark\n\nUSAGE:\n  remark [--ref <notes-ref>] [--base <ref>] [--ignored]\n\nOPTIONS:\n  --ref <notes-ref>   Notes ref to store reviews (default: {DEFAULT_NOTES_REF})\n  --base <ref>        Base ref for base view (default: @{{upstream}} / main / master)\n  --ignored           Include gitignored files in the file list\n\nKEYS (browse):\n  Tab / Shift+Tab     focus files/diff\n  1/2/3/4             all/unstaged/staged/base\n  i                   toggle unified/side-by-side diff\n  I                   toggle showing ignored files\n  R                   reload file list\n  Up/Down             navigate (focused pane)\n  PgUp/PgDn           scroll (focused pane)\n  Enter               focus diff (from files)\n  c                   add/edit comment (file or line)\n  d                   delete comment (file or line)\n  r                   resolve/unresolve comment\n  p                   preview collated prompt\n  y                   copy prompt to clipboard (when open)\n  ?                   help\n  q / Q               quit\n\nTIP:\n  With focus on Files, press `c` to add/edit a file-level comment for the selected file.\n\nKEYS (comment editor):\n  Enter               newline\n  Ctrl+S / F2         accept comment and move on\n  Esc                 cancel\n"
+        "remark\n\nUSAGE:\n  remark [--ref <notes-ref>] [--base <ref>] [--ignored]\n\nOPTIONS:\n  --ref <notes-ref>   Notes ref to store reviews (default: {DEFAULT_NOTES_REF})\n  --base <ref>        Base ref for base view (default: @{{upstream}} / main / master)\n  --ignored           Include gitignored files in the file list\n\nKEYS (browse):\n  h / l or Left/Right focus files/diff\n  1/2/3/4             all/unstaged/staged/base\n  i                   toggle unified/side-by-side diff\n  I                   toggle showing ignored files\n  R                   reload file list\n  Up/Down, j/k        navigate (focused pane)\n  PgUp/PgDn           scroll (focused pane)\n  Ctrl+U / Ctrl+D     page up/down (focused pane)\n  Ctrl+N / Ctrl+P     next/prev unreviewed file (diff pane)\n  v                   toggle reviewed (selected file)\n  Enter               focus diff (from files)\n  c                   add/edit comment (file or line)\n  d                   delete comment (file or line)\n  r                   resolve/unresolve comment\n  p                   open prompt editor\n  ?                   help\n  Esc                 dismiss overlay or quit\n\nTIP:\n  With focus on Files, press `c` to add/edit a file-level comment for the selected file.\n\nKEYS (comment editor):\n  Enter               newline\n  Shift+Enter / Ctrl+S accept comment and close\n  Esc                 cancel\n\nKEYS (prompt editor):\n  Enter               newline\n  Shift+Enter / Ctrl+S copy prompt and close\n  Esc                 close prompt\n"
     );
     std::process::exit(2);
 }
@@ -70,6 +71,7 @@ fn print_help_and_exit() -> ! {
 pub(crate) enum Mode {
     Browse,
     EditComment,
+    EditPrompt,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,8 +174,13 @@ struct App {
     diff_row_heights: Vec<u16>,
     diff_total_visual_lines: u32,
 
+    reviewed_files: HashSet<String>,
+
     editor_target: Option<CommentTarget>,
     editor_buffer: crate::ui::NoteBuffer,
+    prompt_buffer: crate::ui::NoteBuffer,
+    prompt_scroll: u16,
+    prompt_viewport_height: u16,
 
     status: String,
     show_help: bool,
@@ -204,6 +211,14 @@ impl App {
         show_ignored: bool,
     ) -> Result<Self> {
         let highlighter = Highlighter::new()?;
+        let diff_view_mode = match crate::git::read_local_config_value(&repo, CONFIG_DIFF_VIEW_KEY)
+            .ok()
+            .flatten()
+            .as_deref()
+        {
+            Some(v) => parse_diff_view_mode(v).unwrap_or(DiffViewMode::Unified),
+            None => DiffViewMode::Unified,
+        };
         let mut app = Self {
             repo,
             notes_ref,
@@ -212,7 +227,7 @@ impl App {
             view: ViewKind::All,
             focus: Focus::Files,
             mode: Mode::Browse,
-            diff_view_mode: DiffViewMode::Unified,
+            diff_view_mode,
             head_commit_oid: None,
             review: Review::new(),
             files: Vec::new(),
@@ -229,8 +244,12 @@ impl App {
             diff_row_offsets: Vec::new(),
             diff_row_heights: Vec::new(),
             diff_total_visual_lines: 0,
+            reviewed_files: HashSet::new(),
             editor_target: None,
             editor_buffer: crate::ui::NoteBuffer::new(),
+            prompt_buffer: crate::ui::NoteBuffer::new(),
+            prompt_scroll: 0,
+            prompt_viewport_height: 1,
             status: String::new(),
             show_help: false,
             show_prompt: false,
@@ -258,6 +277,12 @@ impl App {
             self.files_viewport_height = rects.files.height.saturating_sub(2).max(1);
             self.diff_viewport_height = rects.diff.height.saturating_sub(2).max(1);
             self.diff_viewport_width = rects.diff.width.saturating_sub(2).max(1);
+            if self.show_prompt {
+                let popup = crate::ui::prompt_popup_rect(outer);
+                self.prompt_viewport_height = popup.height.saturating_sub(2).max(1);
+            } else {
+                self.prompt_viewport_height = 1;
+            }
             self.recompute_diff_metrics(self.diff_viewport_width);
             if !self.manual_scroll {
                 self.ensure_file_visible(self.files_viewport_height);
@@ -265,6 +290,9 @@ impl App {
             }
             self.clamp_file_scroll();
             self.clamp_diff_scroll();
+            if self.mode == Mode::EditPrompt {
+                self.ensure_prompt_visible();
+            }
 
             ui.terminal
                 .draw(|f| {
@@ -275,7 +303,7 @@ impl App {
                             base_ref: self.base_ref.as_deref(),
                             focus: self.focus,
                             mode: self.mode,
-                            diff_view_mode: self.diff_view_mode,
+                            diff_view_mode: self.effective_diff_view_mode(),
                             review: &self.review,
                             files: &self.files,
                             file_rows: &self.file_tree.rows,
@@ -290,12 +318,14 @@ impl App {
                                 .get(self.diff_cursor)
                                 .copied()
                                 .unwrap_or(0),
+                            reviewed_files: &self.reviewed_files,
                             editor_target: self.editor_target.as_ref(),
                             editor_buffer: &self.editor_buffer,
+                            prompt_buffer: &self.prompt_buffer,
+                            prompt_scroll: self.prompt_scroll,
                             status: &self.status,
                             show_help: self.show_help,
                             show_prompt: self.show_prompt,
-                            prompt_text: &crate::review::render_prompt(&self.review),
                         },
                     )
                 })
@@ -326,6 +356,7 @@ impl App {
         match self.mode {
             Mode::Browse => self.handle_browse_key(key),
             Mode::EditComment => self.handle_edit_key(key),
+            Mode::EditPrompt => self.handle_prompt_key(key),
         }
     }
 
@@ -374,29 +405,36 @@ impl App {
             return Ok(false);
         }
 
-        if key.code == KeyCode::Char('p') && key.modifiers.is_empty() {
-            self.show_prompt = !self.show_prompt;
-            return Ok(false);
+        if key.code == KeyCode::Esc {
+            return Ok(true);
         }
 
-        if self.show_prompt && key.code == KeyCode::Char('y') && key.modifiers.is_empty() {
-            let prompt = crate::review::render_prompt(&self.review);
-            match crate::clipboard::copy(&prompt) {
-                Ok(method) => self.status = format!("Copied prompt to clipboard ({method})"),
-                Err(e) => self.status = format!("Clipboard failed: {e}"),
+        if key.code == KeyCode::Char('p') && key.modifiers.is_empty() {
+            if self.show_prompt {
+                self.show_prompt = false;
+                self.mode = Mode::Browse;
+            } else {
+                self.show_prompt = true;
+                self.prompt_buffer =
+                    crate::ui::NoteBuffer::from_string(crate::review::render_prompt(&self.review));
+                self.prompt_scroll = 0;
+                self.mode = Mode::EditPrompt;
             }
             return Ok(false);
         }
 
         match key.code {
-            KeyCode::Tab => self.focus = next_focus(self.focus),
-            KeyCode::BackTab => self.focus = prev_focus(self.focus),
             KeyCode::Char('1') => self.try_set_view(ViewKind::All)?,
             KeyCode::Char('2') => self.try_set_view(ViewKind::Unstaged)?,
             KeyCode::Char('3') => self.try_set_view(ViewKind::Staged)?,
             KeyCode::Char('4') => self.try_set_view(ViewKind::Base)?,
             KeyCode::Char('i') if key.modifiers.is_empty() => self.toggle_diff_view_mode()?,
             KeyCode::Char('R') if no_ctrl_alt => self.reload_file_list()?,
+            KeyCode::Char('h') if key.modifiers.is_empty() => self.focus = Focus::Files,
+            KeyCode::Char('l') if key.modifiers.is_empty() => self.focus = Focus::Diff,
+            KeyCode::Left if no_ctrl_alt => self.focus = Focus::Files,
+            KeyCode::Right if no_ctrl_alt => self.focus = Focus::Diff,
+            KeyCode::Char('v') if key.modifiers.is_empty() => self.toggle_reviewed_for_selected(),
             _ => match self.focus {
                 Focus::Files => self.handle_files_key(key)?,
                 Focus::Diff => self.handle_diff_key(key)?,
@@ -411,6 +449,8 @@ impl App {
         match key.code {
             KeyCode::Up => self.select_file(-1)?,
             KeyCode::Down => self.select_file(1)?,
+            KeyCode::Char('k') if key.modifiers.is_empty() => self.select_file(-1)?,
+            KeyCode::Char('j') if key.modifiers.is_empty() => self.select_file(1)?,
             KeyCode::PageUp => self.select_file(-page)?,
             KeyCode::PageDown => self.select_file(page)?,
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -433,6 +473,8 @@ impl App {
         match key.code {
             KeyCode::Up => self.move_diff_cursor(-1),
             KeyCode::Down => self.move_diff_cursor(1),
+            KeyCode::Char('k') if key.modifiers.is_empty() => self.move_diff_cursor(-1),
+            KeyCode::Char('j') if key.modifiers.is_empty() => self.move_diff_cursor(1),
             KeyCode::PageUp => self.move_diff_cursor(-page),
             KeyCode::PageDown => self.move_diff_cursor(page),
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -440,6 +482,12 @@ impl App {
             }
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.move_diff_cursor(page)
+            }
+            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.select_next_unreviewed(1)?;
+            }
+            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.select_next_unreviewed(-1)?;
             }
             KeyCode::Char('c') if key.modifiers.is_empty() => self.begin_comment()?,
             KeyCode::Char('d') if key.modifiers.is_empty() => self.delete_comment()?,
@@ -488,13 +536,16 @@ impl App {
             return Ok(false);
         }
 
-        if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if key.code == KeyCode::Char('s')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::ALT)
+        {
             self.accept_comment_and_move_on()?;
             return Ok(false);
         }
 
         match key.code {
-            KeyCode::F(2) => {
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.accept_comment_and_move_on()?;
             }
             KeyCode::Char('q') | KeyCode::Char('Q') => {
@@ -515,6 +566,66 @@ impl App {
                     && !key.modifiers.contains(KeyModifiers::ALT)
                 {
                     self.editor_buffer.insert_char(c);
+                }
+            }
+            _ => {}
+        }
+
+        Ok(false)
+    }
+
+    fn handle_prompt_key(&mut self, key: KeyEvent) -> Result<bool> {
+        if key.code == KeyCode::Esc {
+            self.mode = Mode::Browse;
+            self.show_prompt = false;
+            self.status = "Closed prompt preview".to_string();
+            return Ok(false);
+        }
+
+        if key.code == KeyCode::Char('s')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::ALT)
+        {
+            let prompt = self.prompt_buffer.as_string();
+            match crate::clipboard::copy(&prompt) {
+                Ok(method) => self.status = format!("Copied prompt to clipboard ({method})"),
+                Err(e) => self.status = format!("Clipboard failed: {e}"),
+            }
+            self.mode = Mode::Browse;
+            self.show_prompt = false;
+            return Ok(false);
+        }
+
+        if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT) {
+            let prompt = self.prompt_buffer.as_string();
+            match crate::clipboard::copy(&prompt) {
+                Ok(method) => self.status = format!("Copied prompt to clipboard ({method})"),
+                Err(e) => self.status = format!("Clipboard failed: {e}"),
+            }
+            self.mode = Mode::Browse;
+            self.show_prompt = false;
+            return Ok(false);
+        }
+
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Char('Q') => {
+                // Don't quit while editing; let Esc close.
+            }
+            KeyCode::Up => self.prompt_buffer.move_up(),
+            KeyCode::Down => self.prompt_buffer.move_down(),
+            KeyCode::Left => self.prompt_buffer.move_left(),
+            KeyCode::Right => self.prompt_buffer.move_right(),
+            KeyCode::Home => self.prompt_buffer.move_line_start(),
+            KeyCode::End => self.prompt_buffer.move_line_end(),
+            KeyCode::Backspace => {
+                self.prompt_buffer.backspace();
+            }
+            KeyCode::Enter => self.prompt_buffer.insert_newline(),
+            KeyCode::Char(c) => {
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT)
+                {
+                    self.prompt_buffer.insert_char(c);
                 }
             }
             _ => {}
@@ -617,6 +728,9 @@ impl App {
         self.manual_scroll = false;
         self.show_help = false;
         self.show_prompt = false;
+        self.prompt_buffer = crate::ui::NoteBuffer::new();
+        self.prompt_scroll = 0;
+        self.reviewed_files.clear();
         self.status.clear();
         self.file_selected = 0;
         self.file_scroll = 0;
@@ -711,6 +825,14 @@ impl App {
             self.status = "No HEAD commit (unborn branch) — notes disabled".to_string();
         }
 
+        self.reviewed_files = self
+            .review
+            .files
+            .iter()
+            .filter(|(_, f)| f.reviewed)
+            .map(|(path, _)| path.clone())
+            .collect();
+
         self.reload_diff_for_selected()?;
         Ok(())
     }
@@ -719,6 +841,8 @@ impl App {
         let keep_path = self.files.get(self.file_selected).map(|e| e.path.clone());
         let keep_line = self.keep_cursor_line();
         self.manual_scroll = false;
+        self.prompt_scroll = 0;
+        self.reviewed_files.clear();
 
         self.head_commit_oid = crate::git::head_commit_oid(&self.repo).ok();
         self.files = self.list_files_for_view()?;
@@ -806,6 +930,14 @@ impl App {
                 }
             }
         }
+
+        self.reviewed_files = self
+            .review
+            .files
+            .iter()
+            .filter(|(_, f)| f.reviewed)
+            .map(|(path, _)| path.clone())
+            .collect();
 
         self.reload_diff_for_selected()?;
         if let Some(k) = keep_line
@@ -1038,7 +1170,7 @@ impl App {
             .join("\n")
             + "\n";
 
-        let mut rows = match self.diff_view_mode {
+        let mut rows = match self.effective_diff_view_mode() {
             DiffViewMode::Unified => self.build_unified_rows(&path, &diff_lines, &raw)?,
             DiffViewMode::SideBySide => self.build_side_by_side_rows(&path, &diff_lines, &raw)?,
         };
@@ -1096,6 +1228,36 @@ impl App {
         let cur = self.diff_cursor as i32;
         let max = (self.diff_rows.len() - 1) as i32;
         self.diff_cursor = (cur + delta).clamp(0, max) as usize;
+    }
+
+    fn effective_diff_view_mode(&self) -> DiffViewMode {
+        let change = self.files.get(self.file_selected).map(|e| e.change);
+        match change {
+            Some(FileChangeKind::Added | FileChangeKind::Deleted) => DiffViewMode::Unified,
+            _ => self.diff_view_mode,
+        }
+    }
+
+    fn select_next_unreviewed(&mut self, dir: i32) -> Result<()> {
+        if self.files.is_empty() {
+            self.status = "No files".to_string();
+            return Ok(());
+        }
+        let len = self.files.len() as i32;
+        let mut idx = self.file_selected as i32;
+        loop {
+            idx += dir;
+            if idx < 0 || idx >= len {
+                self.status = "No unreviewed files".to_string();
+                return Ok(());
+            }
+            let path = &self.files[idx as usize].path;
+            if !self.reviewed_files.contains(path) {
+                self.file_selected = idx as usize;
+                self.reload_diff_for_selected()?;
+                return Ok(());
+            }
+        }
     }
 
     fn ensure_diff_visible(&mut self, viewport_height: u16) {
@@ -1156,6 +1318,41 @@ impl App {
         let max_scroll = total.saturating_sub(viewport).min(u16::MAX as u32);
         if (self.file_scroll as u32) > max_scroll {
             self.file_scroll = max_scroll as u16;
+        }
+    }
+
+    fn toggle_reviewed_for_selected(&mut self) {
+        let Some(path) = self.files.get(self.file_selected).map(|e| e.path.clone()) else {
+            self.status = "No file selected".to_string();
+            return;
+        };
+        let entry = self.review.files.entry(path.clone()).or_default();
+        entry.reviewed = !entry.reviewed;
+        if entry.reviewed {
+            self.reviewed_files.insert(path.clone());
+            self.status = "Marked reviewed".to_string();
+        } else {
+            self.reviewed_files.remove(&path);
+            if entry.file_comment.is_none() && entry.comments.is_empty() {
+                self.review.files.remove(&path);
+            }
+            self.status = "Marked unreviewed".to_string();
+        }
+        if let Err(e) = self.persist_file_note(&path) {
+            self.status = format!("Failed to save reviewed state: {e}");
+        }
+    }
+
+    fn ensure_prompt_visible(&mut self) {
+        let viewport = self.prompt_viewport_height.max(1) as usize;
+        let cur = self.prompt_buffer.cursor_row;
+        let scroll = self.prompt_scroll as usize;
+        if cur < scroll {
+            self.prompt_scroll = cur as u16;
+            return;
+        }
+        if cur >= scroll + viewport {
+            self.prompt_scroll = (cur + 1 - viewport) as u16;
         }
     }
 
@@ -1446,7 +1643,9 @@ impl App {
             crate::git::note_file_key_oid(&self.repo, head, view_for_key, base_for_key, path)?;
 
         match self.review.files.get(path) {
-            Some(file) if !file.comments.is_empty() || file.file_comment.is_some() => {
+            Some(file)
+                if !file.comments.is_empty() || file.file_comment.is_some() || file.reviewed =>
+            {
                 let note = crate::review::encode_file_note(file);
                 crate::notes::write(&self.repo, &self.notes_ref, &oid, Some(&note))
                     .with_context(|| format!("write file note for '{path}'"))?;
@@ -1461,21 +1660,10 @@ impl App {
     }
 }
 
-fn next_focus(f: Focus) -> Focus {
-    match f {
-        Focus::Files => Focus::Diff,
-        Focus::Diff => Focus::Files,
-    }
-}
-
-fn prev_focus(f: Focus) -> Focus {
-    match f {
-        Focus::Files => Focus::Diff,
-        Focus::Diff => Focus::Files,
-    }
-}
-
 fn merge_file_review(target: &mut FileReview, incoming: FileReview) {
+    if incoming.reviewed {
+        target.reviewed = true;
+    }
     match (&target.file_comment, &incoming.file_comment) {
         (None, Some(_)) => target.file_comment = incoming.file_comment,
         (Some(t), Some(i)) if t.resolved && !i.resolved => {
@@ -1494,6 +1682,21 @@ fn merge_file_review(target: &mut FileReview, incoming: FileReview) {
             }
             _ => {}
         }
+    }
+}
+
+fn parse_diff_view_mode(raw: &str) -> Option<DiffViewMode> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "side-by-side" | "side_by_side" | "side" => Some(DiffViewMode::SideBySide),
+        "unified" => Some(DiffViewMode::Unified),
+        _ => None,
+    }
+}
+
+fn diff_view_mode_value(mode: DiffViewMode) -> &'static str {
+    match mode {
+        DiffViewMode::Unified => "unified",
+        DiffViewMode::SideBySide => "side-by-side",
     }
 }
 
@@ -1551,6 +1754,14 @@ impl App {
             })
         {
             self.diff_cursor = idx;
+        }
+
+        if let Err(e) = crate::git::write_local_config_value(
+            &self.repo,
+            CONFIG_DIFF_VIEW_KEY,
+            diff_view_mode_value(self.diff_view_mode),
+        ) {
+            self.status = format!("Failed to save diff view: {e}");
         }
 
         Ok(())

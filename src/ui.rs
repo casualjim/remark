@@ -1,7 +1,11 @@
+use std::collections::HashSet;
 use std::io::{Stdout, stdout};
 
 use anyhow::{Context, Result};
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -24,19 +28,39 @@ use crate::review::{CommentState, Review};
 
 pub struct Ui {
     pub terminal: Terminal<CrosstermBackend<Stdout>>,
+    keyboard_enhancements: bool,
 }
 
 impl Ui {
     pub fn new() -> Result<Self> {
         enable_raw_mode().context("enable raw mode")?;
         execute!(stdout(), EnterAlternateScreen, EnableMouseCapture).context("enter alt screen")?;
+        let keyboard_enhancements = match crossterm::terminal::supports_keyboard_enhancement() {
+            Ok(true) => {
+                execute!(
+                    stdout(),
+                    PushKeyboardEnhancementFlags(
+                        KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    )
+                )
+                .context("enable keyboard enhancements")?;
+                true
+            }
+            _ => false,
+        };
         let backend = CrosstermBackend::new(stdout());
         let terminal = Terminal::new(backend).context("create terminal")?;
-        Ok(Self { terminal })
+        Ok(Self {
+            terminal,
+            keyboard_enhancements,
+        })
     }
 
     pub fn restore(&mut self) -> Result<()> {
         disable_raw_mode().ok();
+        if self.keyboard_enhancements {
+            execute!(self.terminal.backend_mut(), PopKeyboardEnhancementFlags).ok();
+        }
         execute!(
             self.terminal.backend_mut(),
             DisableMouseCapture,
@@ -80,14 +104,16 @@ pub struct DrawState<'a> {
     pub diff_cursor: usize,
     pub diff_scroll: u16,
     pub diff_cursor_visual: u32,
+    pub reviewed_files: &'a HashSet<String>,
 
     pub editor_target: Option<&'a CommentTarget>,
     pub editor_buffer: &'a NoteBuffer,
+    pub prompt_buffer: &'a NoteBuffer,
+    pub prompt_scroll: u16,
 
     pub status: &'a str,
     pub show_help: bool,
     pub show_prompt: bool,
-    pub prompt_text: &'a str,
 }
 
 pub fn draw(f: &mut ratatui::Frame, s: DrawState<'_>) {
@@ -105,8 +131,8 @@ pub fn draw(f: &mut ratatui::Frame, s: DrawState<'_>) {
     if s.show_help && s.mode == Mode::Browse {
         draw_help(f, outer);
     }
-    if s.show_prompt && s.mode == Mode::Browse {
-        draw_prompt(f, outer, s.prompt_text);
+    if s.show_prompt {
+        draw_prompt(f, outer, &s);
     }
     if s.mode == Mode::EditComment {
         draw_comment_editor(f, rects.diff, &s);
@@ -165,9 +191,16 @@ fn draw_files(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
             }
             CommentState::None => {}
         }
+        if s.reviewed_files.contains(&e.path) {
+            name_style = name_style.add_modifier(Modifier::DIM);
+        }
+        let label = if s.reviewed_files.contains(&e.path) {
+            mark_reviewed_label(&row.label)
+        } else {
+            row.label.clone()
+        };
         items.push(ListItem::new(Line::from(vec![Span::styled(
-            row.label.clone(),
-            name_style,
+            label, name_style,
         )])));
     }
 
@@ -214,6 +247,14 @@ fn git_status_style(xy: [char; 2]) -> Style {
             .add_modifier(Modifier::BOLD);
     }
     Style::default().fg(Color::Yellow)
+}
+
+fn mark_reviewed_label(label: &str) -> String {
+    if let Some((before, after)) = label.rsplit_once("─ ") {
+        format!("{before}─✓{after}")
+    } else {
+        format!("✓ {}", label)
+    }
 }
 
 fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
@@ -648,7 +689,11 @@ fn draw_footer(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
             )
         }
         Mode::EditComment => {
-            let s = "comment editor  (Ctrl+S accept)  (Esc cancel)".to_string();
+            let s = "comment editor  (Shift+Enter/Ctrl+S accept)  (Esc cancel)".to_string();
+            fit_with_ellipsis(&s, area.width as usize)
+        }
+        Mode::EditPrompt => {
+            let s = "prompt editor  (Shift+Enter/Ctrl+S copy)  (Esc close)".to_string();
             fit_with_ellipsis(&s, area.width as usize)
         }
     };
@@ -688,20 +733,23 @@ fn fit_with_ellipsis(s: &str, width: usize) -> String {
 fn draw_help(f: &mut ratatui::Frame, area: Rect) {
     let help = Text::from(vec![
         Line::from("Focus"),
-        Line::from("  Tab / Shift+Tab   Switch between files and diff"),
+        Line::from("  h / l or Left/Right   Switch between files and diff"),
         Line::from(""),
         Line::from("Views"),
         Line::from("  1 / 2 / 3 / 4     All / Unstaged / Staged / Base"),
         Line::from(""),
         Line::from("Files"),
-        Line::from("  Up/Down           Select file"),
+        Line::from("  Up/Down, j/k      Select file"),
         Line::from("  Ctrl+U / Ctrl+D   Page up / down"),
         Line::from("  Enter             Move focus to diff"),
         Line::from("  c                 Add/edit file comment"),
+        Line::from("  v                 Toggle reviewed"),
         Line::from(""),
         Line::from("Diff"),
-        Line::from("  Up/Down, PgUp/Dn  Navigate diff"),
+        Line::from("  Up/Down, j/k      Navigate diff"),
+        Line::from("  PgUp/Dn           Page up / down"),
         Line::from("  Ctrl+U / Ctrl+D   Page up / down"),
+        Line::from("  Ctrl+N / Ctrl+P   Next/prev unreviewed file"),
         Line::from("  i                 Toggle unified / side-by-side"),
         Line::from("  R                 Reload file list"),
         Line::from("  c                 Add/edit comment (file or line)"),
@@ -709,14 +757,18 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect) {
         Line::from("  r                 Resolve/unresolve comment"),
         Line::from(""),
         Line::from("Review"),
-        Line::from("  p                 Toggle prompt preview"),
-        Line::from("  y                 Copy prompt to clipboard (when open)"),
+        Line::from("  p                 Open prompt editor"),
         Line::from("  q / Q             Quit"),
+        Line::from("  Esc               Dismiss overlay or quit"),
         Line::from(""),
         Line::from("Comment editor"),
-        Line::from("  Ctrl+S / F2        Accept and move on"),
+        Line::from("  Shift+Enter/Ctrl+S  Accept and close"),
         Line::from("  Enter             Newline"),
         Line::from("  Esc               Cancel"),
+        Line::from(""),
+        Line::from("Prompt editor"),
+        Line::from("  Shift+Enter/Ctrl+S  Copy prompt and close"),
+        Line::from("  Esc               Close prompt"),
         Line::from(""),
         Line::from("Help"),
         Line::from("  ? or Esc          Close this help"),
@@ -729,17 +781,46 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect) {
     f.render_widget(para, popup);
 }
 
-fn draw_prompt(f: &mut ratatui::Frame, area: Rect, prompt: &str) {
-    let popup = centered_rect(82, 82, area);
+pub fn prompt_popup_rect(area: Rect) -> Rect {
+    centered_rect(82, 82, area)
+}
+
+fn draw_prompt(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
+    let popup = prompt_popup_rect(area);
     f.render_widget(Clear, popup);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("LLM Prompt Preview (collated)");
-    let para = Paragraph::new(Text::raw(prompt))
-        .block(block)
+    let title = match s.mode {
+        Mode::EditPrompt => {
+            "LLM Prompt (editable)  (Shift+Enter/Ctrl+S copy, Esc close)".to_string()
+        }
+        _ => "LLM Prompt Preview (collated)".to_string(),
+    };
+    let block = Block::default().borders(Borders::ALL).title(title);
+
+    let text = Text::from(
+        s.prompt_buffer
+            .lines
+            .iter()
+            .map(|l| Line::from(Span::raw(l.clone())))
+            .collect::<Vec<_>>(),
+    );
+    let para = Paragraph::new(text)
         .wrap(Wrap { trim: false })
-        .scroll((0, 0));
-    f.render_widget(para, popup);
+        .scroll((s.prompt_scroll, 0));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+    f.render_widget(para, inner);
+
+    if s.mode == Mode::EditPrompt {
+        let rel_row = s
+            .prompt_buffer
+            .cursor_row
+            .saturating_sub(s.prompt_scroll as usize) as u16;
+        let cur_y = inner.y + rel_row;
+        let cur_x = inner.x + s.prompt_buffer.cursor_col as u16;
+        if cur_y < inner.y + inner.height && cur_x < inner.x + inner.width {
+            f.set_cursor_position((cur_x, cur_y));
+        }
+    }
 }
 
 fn draw_comment_editor(f: &mut ratatui::Frame, diff_area: Rect, s: &DrawState<'_>) {
@@ -777,13 +858,21 @@ fn draw_comment_editor(f: &mut ratatui::Frame, diff_area: Rect, s: &DrawState<'_
 
     f.render_widget(Clear, popup);
     let title = match target.locator {
-        CommentLocator::File => format!("Comment {} (file)  (Ctrl+S accept)", target.path),
+        CommentLocator::File => {
+            format!(
+                "Comment {} (file)  (Shift+Enter/Ctrl+S accept)",
+                target.path
+            )
+        }
         CommentLocator::Line { side, line } => {
             let side = match side {
                 crate::review::LineSide::Old => "old",
                 crate::review::LineSide::New => "new",
             };
-            format!("Comment {}:{} ({side})  (Ctrl+S accept)", target.path, line)
+            format!(
+                "Comment {}:{} ({side})  (Shift+Enter/Ctrl+S accept)",
+                target.path, line
+            )
         }
     };
     let block = Block::default()
