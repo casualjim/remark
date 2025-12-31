@@ -5,6 +5,9 @@ use gix::bstr::{BStr, ByteSlice};
 use gix::{ObjectId, Repository};
 use gix_dir::walk::EmissionMode;
 
+pub const DEFAULT_NOTES_REF: &str = "refs/notes/remark";
+pub const CONFIG_NOTES_REF_KEY: &str = "remark.notesRef";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewKind {
     All,
@@ -48,6 +51,13 @@ pub fn read_local_config_value(repo: &Repository, key: &str) -> Result<Option<St
         Err(_) => None,
     };
     Ok(value)
+}
+
+pub fn read_notes_ref(repo: &Repository) -> String {
+    read_local_config_value(repo, CONFIG_NOTES_REF_KEY)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| DEFAULT_NOTES_REF.to_string())
 }
 
 pub fn write_local_config_value(repo: &Repository, key: &str, value: &str) -> Result<()> {

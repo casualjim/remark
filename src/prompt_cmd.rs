@@ -3,14 +3,12 @@ use anyhow::{Context, Result};
 use crate::git::ViewKind;
 use crate::review::{FileReview, Review};
 
-const DEFAULT_NOTES_REF: &str = "refs/notes/remark";
-
 pub fn run() -> Result<()> {
     let repo = gix::discover(std::env::current_dir().context("get current directory")?)
         .context("discover git repository")?;
 
     // `remark prompt [--ref <notes-ref>] [--filter all|staged|unstaged|base] [--base <ref>] [--copy]`
-    let mut notes_ref = DEFAULT_NOTES_REF.to_string();
+    let mut notes_ref = crate::git::read_notes_ref(&repo);
     let mut filter = Filter::All;
     let mut base_ref: Option<String> = None;
     let mut copy = false;
@@ -153,7 +151,8 @@ fn merge_file_review(target: &mut FileReview, incoming: FileReview) {
 
 fn print_help_and_exit() -> ! {
     eprintln!(
-        "remark prompt\n\nUSAGE:\n  remark prompt [--filter all|staged|unstaged|base] [--base <ref>] [--ref <notes-ref>] [--copy]\n\nOPTIONS:\n  --filter <f>        Filter files (default: all)\n  --base <ref>        Base ref when --filter base\n  --ref <notes-ref>   Notes ref to read (default: {DEFAULT_NOTES_REF})\n  --copy, -c          Copy prompt to clipboard\n"
+        "remark prompt\n\nUSAGE:\n  remark prompt [--filter all|staged|unstaged|base] [--base <ref>] [--ref <notes-ref>] [--copy]\n\nOPTIONS:\n  --filter <f>        Filter files (default: all)\n  --base <ref>        Base ref when --filter base\n  --ref <notes-ref>   Notes ref to read (default: remark.notesRef or {default_notes_ref})\n  --copy, -c          Copy prompt to clipboard\n",
+        default_notes_ref = crate::git::DEFAULT_NOTES_REF
     );
     std::process::exit(2);
 }

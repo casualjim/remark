@@ -13,7 +13,6 @@ use crate::highlight::Highlighter;
 use crate::review::{FileReview, LineSide, Review};
 use unicode_width::UnicodeWidthStr;
 
-const DEFAULT_NOTES_REF: &str = "refs/notes/remark";
 const CONFIG_DIFF_VIEW_KEY: &str = "remark.diffView";
 const CONFIG_DIFF_CONTEXT_KEY: &str = "remark.diffContext";
 const DEFAULT_DIFF_CONTEXT: u32 = 3;
@@ -29,7 +28,7 @@ struct Config {
 
 impl Config {
     fn from_env(repo: &gix::Repository) -> Self {
-        let mut notes_ref = DEFAULT_NOTES_REF.to_string();
+        let mut notes_ref = crate::git::read_notes_ref(repo);
         let mut base_ref: Option<String> = crate::git::default_base_ref(repo);
         let mut show_ignored = false;
 
@@ -66,7 +65,8 @@ impl Config {
 
 fn print_help_and_exit() -> ! {
     eprintln!(
-        "remark\n\nUSAGE:\n  remark [--ref <notes-ref>] [--base <ref>] [--ignored]\n\nOPTIONS:\n  --ref <notes-ref>   Notes ref to store reviews (default: {DEFAULT_NOTES_REF})\n  --base <ref>        Base ref for base view (default: @{{upstream}} / main / master)\n  --ignored           Include gitignored files in the file list\n\nKEYS (browse):\n  h / l or Left/Right focus files/diff\n  1/2/3/4             all/unstaged/staged/base\n  i                   toggle unified/side-by-side diff\n  [ / ]               less/more diff context\n  I                   toggle showing ignored files\n  R                   reload file list\n  Up/Down, j/k        navigate (focused pane)\n  PgUp/PgDn           scroll (focused pane)\n  Ctrl+U / Ctrl+D     page up/down (focused pane)\n  Ctrl+N / Ctrl+P     next/prev unreviewed file (diff pane)\n  v                   toggle reviewed (selected file)\n  Enter               focus diff (from files)\n  c                   add/edit comment (file or line)\n  d                   delete comment (file or line)\n  r                   resolve/unresolve comment\n  p                   open prompt editor\n  ?                   help\n  Esc                 dismiss overlay or quit\n\nTIP:\n  With focus on Files, press `c` to add/edit a file-level comment for the selected file.\n\nKEYS (comment editor):\n  Enter               newline\n  Shift+Enter / Ctrl+S accept comment and close\n  Esc                 cancel\n\nKEYS (prompt editor):\n  Enter               newline\n  Shift+Enter / Ctrl+S copy prompt and close\n  Esc                 close prompt\n"
+        "remark\n\nUSAGE:\n  remark [--ref <notes-ref>] [--base <ref>] [--ignored]\n  remark <command> [<args>]\n\nOPTIONS:\n  --ref <notes-ref>   Notes ref to store reviews (default: remark.notesRef or {default_notes_ref})\n  --base <ref>        Base ref for base view (default: @{{upstream}} / main / master)\n  --ignored           Include gitignored files in the file list\n\nSUBCOMMANDS:\n  prompt             Render a collated review prompt\n  resolve            Resolve or unresolve comments\n  new                Start a new review session (new notes ref)\n  purge              Delete all remark notes refs\n\nKEYS (browse):\n  h / l or Left/Right focus files/diff\n  1/2/3/4             all/unstaged/staged/base\n  i                   toggle unified/side-by-side diff\n  [ / ]               less/more diff context\n  I                   toggle showing ignored files\n  R                   reload file list\n  Up/Down, j/k        navigate (focused pane)\n  PgUp/PgDn           scroll (focused pane)\n  Ctrl+U / Ctrl+D     page up/down (focused pane)\n  Ctrl+N / Ctrl+P     next/prev unreviewed file (diff pane)\n  v                   toggle reviewed (selected file)\n  Enter               focus diff (from files)\n  c                   add/edit comment (file or line)\n  d                   delete comment (file or line)\n  r                   resolve/unresolve comment\n  p                   open prompt editor\n  ?                   help\n  Esc                 dismiss overlay or quit\n\nTIP:\n  With focus on Files, press `c` to add/edit a file-level comment for the selected file.\n\nKEYS (comment editor):\n  Enter               newline\n  Shift+Enter / Ctrl+S accept comment and close\n  Esc                 cancel\n\nKEYS (prompt editor):\n  Enter               newline\n  Shift+Enter / Ctrl+S copy prompt and close\n  Esc                 close prompt\n",
+        default_notes_ref = crate::git::DEFAULT_NOTES_REF
     );
     std::process::exit(2);
 }
