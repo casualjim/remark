@@ -92,6 +92,7 @@ pub struct DrawState<'a> {
     pub focus: Focus,
     pub mode: Mode,
     pub diff_view_mode: DiffViewMode,
+    pub diff_context: u32,
     pub review: &'a Review,
 
     pub files: &'a [FileEntry],
@@ -684,7 +685,7 @@ fn draw_footer(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
         Mode::Browse => {
             // Intentionally minimal: rely on `?` for keybinding help.
             fit_with_ellipsis(
-                &format!("view={view_label} diff={diff_mode}"),
+                &format!("view={view_label} diff={diff_mode} ctx={}", s.diff_context),
                 area.width as usize,
             )
         }
@@ -751,6 +752,7 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect) {
         Line::from("  Ctrl+U / Ctrl+D   Page up / down"),
         Line::from("  Ctrl+N / Ctrl+P   Next/prev unreviewed file"),
         Line::from("  i                 Toggle unified / side-by-side"),
+        Line::from("  [ / ]             Less/more diff context"),
         Line::from("  R                 Reload file list"),
         Line::from("  c                 Add/edit comment (file or line)"),
         Line::from("  d                 Delete comment (file or line)"),

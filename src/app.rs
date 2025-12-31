@@ -15,6 +15,10 @@ use unicode_width::UnicodeWidthStr;
 
 const DEFAULT_NOTES_REF: &str = "refs/notes/remark";
 const CONFIG_DIFF_VIEW_KEY: &str = "remark.diffView";
+const CONFIG_DIFF_CONTEXT_KEY: &str = "remark.diffContext";
+const DEFAULT_DIFF_CONTEXT: u32 = 3;
+const MIN_DIFF_CONTEXT: u32 = 0;
+const MAX_DIFF_CONTEXT: u32 = 20;
 
 #[derive(Debug, Clone)]
 struct Config {
@@ -62,7 +66,7 @@ impl Config {
 
 fn print_help_and_exit() -> ! {
     eprintln!(
-        "remark\n\nUSAGE:\n  remark [--ref <notes-ref>] [--base <ref>] [--ignored]\n\nOPTIONS:\n  --ref <notes-ref>   Notes ref to store reviews (default: {DEFAULT_NOTES_REF})\n  --base <ref>        Base ref for base view (default: @{{upstream}} / main / master)\n  --ignored           Include gitignored files in the file list\n\nKEYS (browse):\n  h / l or Left/Right focus files/diff\n  1/2/3/4             all/unstaged/staged/base\n  i                   toggle unified/side-by-side diff\n  I                   toggle showing ignored files\n  R                   reload file list\n  Up/Down, j/k        navigate (focused pane)\n  PgUp/PgDn           scroll (focused pane)\n  Ctrl+U / Ctrl+D     page up/down (focused pane)\n  Ctrl+N / Ctrl+P     next/prev unreviewed file (diff pane)\n  v                   toggle reviewed (selected file)\n  Enter               focus diff (from files)\n  c                   add/edit comment (file or line)\n  d                   delete comment (file or line)\n  r                   resolve/unresolve comment\n  p                   open prompt editor\n  ?                   help\n  Esc                 dismiss overlay or quit\n\nTIP:\n  With focus on Files, press `c` to add/edit a file-level comment for the selected file.\n\nKEYS (comment editor):\n  Enter               newline\n  Shift+Enter / Ctrl+S accept comment and close\n  Esc                 cancel\n\nKEYS (prompt editor):\n  Enter               newline\n  Shift+Enter / Ctrl+S copy prompt and close\n  Esc                 close prompt\n"
+        "remark\n\nUSAGE:\n  remark [--ref <notes-ref>] [--base <ref>] [--ignored]\n\nOPTIONS:\n  --ref <notes-ref>   Notes ref to store reviews (default: {DEFAULT_NOTES_REF})\n  --base <ref>        Base ref for base view (default: @{{upstream}} / main / master)\n  --ignored           Include gitignored files in the file list\n\nKEYS (browse):\n  h / l or Left/Right focus files/diff\n  1/2/3/4             all/unstaged/staged/base\n  i                   toggle unified/side-by-side diff\n  [ / ]               less/more diff context\n  I                   toggle showing ignored files\n  R                   reload file list\n  Up/Down, j/k        navigate (focused pane)\n  PgUp/PgDn           scroll (focused pane)\n  Ctrl+U / Ctrl+D     page up/down (focused pane)\n  Ctrl+N / Ctrl+P     next/prev unreviewed file (diff pane)\n  v                   toggle reviewed (selected file)\n  Enter               focus diff (from files)\n  c                   add/edit comment (file or line)\n  d                   delete comment (file or line)\n  r                   resolve/unresolve comment\n  p                   open prompt editor\n  ?                   help\n  Esc                 dismiss overlay or quit\n\nTIP:\n  With focus on Files, press `c` to add/edit a file-level comment for the selected file.\n\nKEYS (comment editor):\n  Enter               newline\n  Shift+Enter / Ctrl+S accept comment and close\n  Esc                 cancel\n\nKEYS (prompt editor):\n  Enter               newline\n  Shift+Enter / Ctrl+S copy prompt and close\n  Esc                 close prompt\n"
     );
     std::process::exit(2);
 }
@@ -154,6 +158,7 @@ struct App {
     focus: Focus,
     mode: Mode,
     diff_view_mode: DiffViewMode,
+    diff_context: u32,
 
     head_commit_oid: Option<ObjectId>,
     review: Review,
@@ -219,6 +224,14 @@ impl App {
             Some(v) => parse_diff_view_mode(v).unwrap_or(DiffViewMode::Unified),
             None => DiffViewMode::Unified,
         };
+        let diff_context = match crate::git::read_local_config_value(&repo, CONFIG_DIFF_CONTEXT_KEY)
+            .ok()
+            .flatten()
+            .as_deref()
+        {
+            Some(v) => parse_diff_context(v).unwrap_or(DEFAULT_DIFF_CONTEXT),
+            None => DEFAULT_DIFF_CONTEXT,
+        };
         let mut app = Self {
             repo,
             notes_ref,
@@ -228,6 +241,7 @@ impl App {
             focus: Focus::Files,
             mode: Mode::Browse,
             diff_view_mode,
+            diff_context,
             head_commit_oid: None,
             review: Review::new(),
             files: Vec::new(),
@@ -304,6 +318,7 @@ impl App {
                             focus: self.focus,
                             mode: self.mode,
                             diff_view_mode: self.effective_diff_view_mode(),
+                            diff_context: self.diff_context,
                             review: &self.review,
                             files: &self.files,
                             file_rows: &self.file_tree.rows,
@@ -492,6 +507,8 @@ impl App {
             KeyCode::Char('c') if key.modifiers.is_empty() => self.begin_comment()?,
             KeyCode::Char('d') if key.modifiers.is_empty() => self.delete_comment()?,
             KeyCode::Char('r') if key.modifiers.is_empty() => self.toggle_resolved()?,
+            KeyCode::Char('[') if key.modifiers.is_empty() => self.adjust_diff_context(-1)?,
+            KeyCode::Char(']') if key.modifiers.is_empty() => self.adjust_diff_context(1)?,
             _ => {}
         }
         Ok(())
@@ -1132,6 +1149,7 @@ impl App {
             &after_label,
             before.as_deref(),
             after.as_deref(),
+            self.diff_context,
         )?;
         let diff_lines: Vec<crate::diff::Line> = diff_lines_all
             .into_iter()
@@ -1693,6 +1711,11 @@ fn parse_diff_view_mode(raw: &str) -> Option<DiffViewMode> {
     }
 }
 
+fn parse_diff_context(raw: &str) -> Option<u32> {
+    let parsed = raw.trim().parse::<u32>().ok()?;
+    Some(parsed.clamp(MIN_DIFF_CONTEXT, MAX_DIFF_CONTEXT))
+}
+
 fn diff_view_mode_value(mode: DiffViewMode) -> &'static str {
     match mode {
         DiffViewMode::Unified => "unified",
@@ -1764,6 +1787,33 @@ impl App {
             self.status = format!("Failed to save diff view: {e}");
         }
 
+        Ok(())
+    }
+
+    fn adjust_diff_context(&mut self, delta: i32) -> Result<()> {
+        let cur = i32::try_from(self.diff_context).unwrap_or(i32::MAX);
+        let min = i32::try_from(MIN_DIFF_CONTEXT).unwrap_or(i32::MIN);
+        let max = i32::try_from(MAX_DIFF_CONTEXT).unwrap_or(i32::MAX);
+        let next = (cur + delta).clamp(min, max);
+        let next = u32::try_from(next).unwrap_or(self.diff_context);
+        if next == self.diff_context {
+            return Ok(());
+        }
+        let keep_line = self.keep_cursor_line();
+        self.diff_context = next;
+        self.reload_diff_for_selected()?;
+        if let Some(k) = keep_line
+            && let Some(idx) = self.find_row_for_keep_line(k)
+        {
+            self.diff_cursor = idx;
+        }
+        if let Err(e) = crate::git::write_local_config_value(
+            &self.repo,
+            CONFIG_DIFF_CONTEXT_KEY,
+            &self.diff_context.to_string(),
+        ) {
+            self.status = format!("Failed to save diff context: {e}");
+        }
         Ok(())
     }
 

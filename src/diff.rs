@@ -26,6 +26,7 @@ pub fn unified_file_diff(
     after_label: &str,
     before: Option<&str>,
     after: Option<&str>,
+    context_lines: u32,
 ) -> Result<Vec<Line>> {
     let before_s = before.unwrap_or("");
     let after_s = after.unwrap_or("");
@@ -45,7 +46,11 @@ pub fn unified_file_diff(
     });
 
     let input = InternedInput::new(before_s.as_bytes(), after_s.as_bytes());
-    let sink = UnifiedDiff::new(&input, CollectUnified::new(), ContextSize::symmetrical(3));
+    let sink = UnifiedDiff::new(
+        &input,
+        CollectUnified::new(),
+        ContextSize::symmetrical(context_lines as _),
+    );
     let collected =
         gix_diff::blob::diff(Algorithm::Histogram, &input, sink).context("render unified diff")?;
     out.extend(collected.lines);
@@ -174,7 +179,7 @@ mod tests {
         let before = "fn keep() {}\nfn change() { 1 }\nfn tail() {}\n";
         let after = "fn keep() {}\nfn change() { 2 }\nfn tail() {}\n";
 
-        let lines = unified_file_diff("a/x.rs", "b/x.rs", Some(before), Some(after)).unwrap();
+        let lines = unified_file_diff("a/x.rs", "b/x.rs", Some(before), Some(after), 3).unwrap();
         let header = lines
             .iter()
             .find(|l| l.kind == Kind::HunkHeader)
@@ -188,7 +193,7 @@ mod tests {
         let before = "one\n";
         let after = "two\n";
 
-        let lines = unified_file_diff("a/t.txt", "b/t.txt", Some(before), Some(after)).unwrap();
+        let lines = unified_file_diff("a/t.txt", "b/t.txt", Some(before), Some(after), 3).unwrap();
         let header = lines
             .iter()
             .find(|l| l.kind == Kind::HunkHeader)

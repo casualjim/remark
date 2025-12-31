@@ -217,10 +217,12 @@ impl Review {
         });
         let mut changed = f.comments.len() != before;
 
-        if f.file_comment.is_none() && f.comments.is_empty() && !f.reviewed {
-            if self.files.remove(path).is_some() {
-                changed = true;
-            }
+        if f.file_comment.is_none()
+            && f.comments.is_empty()
+            && !f.reviewed
+            && self.files.remove(path).is_some()
+        {
+            changed = true;
         }
 
         changed
