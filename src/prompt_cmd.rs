@@ -7,11 +7,10 @@ pub fn run() -> Result<()> {
     let repo = gix::discover(std::env::current_dir().context("get current directory")?)
         .context("discover git repository")?;
 
-    // `remark prompt [--ref <notes-ref>] [--filter all|staged|unstaged|base] [--base <ref>] [--copy]`
+    // `remark prompt [--ref <notes-ref>] [--filter all|staged|unstaged|base] [--base <ref>]`
     let mut notes_ref = crate::git::read_notes_ref(&repo);
     let mut filter = Filter::All;
     let mut base_ref: Option<String> = None;
-    let mut copy = false;
 
     let mut args = std::env::args().skip(2);
     while let Some(arg) = args.next() {
@@ -36,9 +35,6 @@ pub fn run() -> Result<()> {
                 if let Some(v) = args.next() {
                     base_ref = Some(v);
                 }
-            }
-            "--copy" | "-c" => {
-                copy = true;
             }
             "-h" | "--help" => {
                 print_help_and_exit();
@@ -107,14 +103,9 @@ pub fn run() -> Result<()> {
     }
 
     let prompt = crate::review::render_prompt(&review);
-    if copy {
-        let method = crate::clipboard::copy(&prompt)?;
-        eprintln!("Copied prompt to clipboard ({method})");
-    } else {
-        print!("{prompt}");
-        if !prompt.ends_with('\n') {
-            println!();
-        }
+    print!("{prompt}");
+    if !prompt.ends_with('\n') {
+        println!();
     }
     Ok(())
 }
@@ -151,7 +142,7 @@ fn merge_file_review(target: &mut FileReview, incoming: FileReview) {
 
 fn print_help_and_exit() -> ! {
     eprintln!(
-        "remark prompt\n\nUSAGE:\n  remark prompt [--filter all|staged|unstaged|base] [--base <ref>] [--ref <notes-ref>] [--copy]\n\nOPTIONS:\n  --filter <f>        Filter files (default: all)\n  --base <ref>        Base ref when --filter base\n  --ref <notes-ref>   Notes ref to read (default: remark.notesRef or {default_notes_ref})\n  --copy, -c          Copy prompt to clipboard\n",
+        "remark prompt\n\nUSAGE:\n  remark prompt [--filter all|staged|unstaged|base] [--base <ref>] [--ref <notes-ref>]\n\nOPTIONS:\n  --filter <f>        Filter files (default: all)\n  --base <ref>        Base ref when --filter base\n  --ref <notes-ref>   Notes ref to read (default: remark.notesRef or {default_notes_ref})\n\nTIP:\n  Pipe to clipboard:\n    wayland:  remark prompt | wl-copy\n    x11:      remark prompt | xclip -selection clipboard\n    macos:    remark prompt | pbcopy\n    windows:  remark prompt | clip\n    powershell: remark prompt | Set-Clipboard\n",
         default_notes_ref = crate::git::DEFAULT_NOTES_REF
     );
     std::process::exit(2);
