@@ -42,4 +42,4 @@
 
 ## Release Notes (Maintainers)
 
-Releases are cut automatically after CI passes on pushes to `main`. The `Cut Release` workflow runs `git-cliff` to update `CHANGELOG.md` and then uses `cargo-release` to bump the patch version and tag `vX.Y.Z`. Pushing the tag triggers `cargo-dist` to publish GitHub Release artifacts. There is no release PR flow.
+Releases are cut automatically after CI passes on pushes to `main`. The `Cut Release` workflow runs `git-cliff` to update `CHANGELOG.md` and then uses `cargo-release` to bump the patch version and tag `vX.Y.Z`. Pushing the tag triggers `cargo-dist` to publish GitHub Release artifacts. A repo secret named `RELEASE_TOKEN` is required so the tag push can trigger the `Release` workflow. There is no release PR flow.

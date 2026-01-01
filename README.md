@@ -50,6 +50,23 @@ The resulting binary is:
 target/release/remark
 ```
 
+## Release (maintainers)
+
+Releases are cut automatically after CI passes on pushes to `main` by the
+`Cut Release` workflow. It:
+
+- Updates `CHANGELOG.md` via `git-cliff`
+- Runs `cargo release` to bump the patch version and tag
+- Pushes the release commit and tag
+
+Artifacts are built and published by the `Release` workflow, which is triggered
+by the tag push.
+
+Important: the tag push must be made with a token that can trigger workflows.
+Set a repo secret named `RELEASE_TOKEN` (a PAT with contents write + workflow
+permissions). Without it, the tag push will not trigger `Release`, and no
+GitHub Release artifacts will be produced.
+
 ## Usage
 
 Run inside a git repository:
