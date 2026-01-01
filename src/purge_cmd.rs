@@ -38,9 +38,7 @@ pub fn run() -> Result<()> {
 
     let mut reset_config = false;
     let configured = crate::git::read_notes_ref(&repo);
-    if is_remark_ref_name(configured.as_bytes())
-        && configured != crate::git::DEFAULT_NOTES_REF
-    {
+    if is_remark_ref_name(configured.as_bytes()) && configured != crate::git::DEFAULT_NOTES_REF {
         crate::git::write_local_config_value(
             &repo,
             crate::git::CONFIG_NOTES_REF_KEY,
