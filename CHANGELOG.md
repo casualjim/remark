@@ -3,6 +3,11 @@
 ### 📚 Documentation
 
 - Clarify release workflow and token
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.3
+- Release remark version 0.1.3
 ## [0.1.2] - 2026-01-01
 
 ### 🐛 Bug Fixes
