@@ -1,3 +1,14 @@
+## [0.1.6] - 2026-01-01
+
+### ⚙️ Miscellaneous Tasks
+
+- Skip ci on release commits
+## [0.1.5] - 2026-01-01
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.5
+- Release remark version 0.1.5
 ## [0.1.4] - 2026-01-01
 
 ### ⚙️ Miscellaneous Tasks
