@@ -49,6 +49,7 @@ sign-commit = false
 sign-tag = false
 publish = false
 tag-prefix = "v"
+allow-branch = ["main"]
 
 [package.metadata.wix]
 upgrade-guid = "57638460-6758-438B-A317-03146D8FE5F7"
