@@ -1,8 +1,15 @@
+## [0.1.7] - 2026-01-01
+
+### 🐛 Bug Fixes
+
+- Correct release workflow triggers
 ## [0.1.6] - 2026-01-01
 
 ### ⚙️ Miscellaneous Tasks
 
 - Skip ci on release commits
+- Update changelog for v0.1.6 [ci skip]
+- Release remark version 0.1.6 [ci skip]
 ## [0.1.5] - 2026-01-01
 
 ### ⚙️ Miscellaneous Tasks
