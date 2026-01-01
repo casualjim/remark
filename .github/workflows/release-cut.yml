@@ -45,12 +45,15 @@ jobs:
           import tomllib
           from pathlib import Path
 
+          import os
+
           with open("Cargo.toml", "rb") as f:
               data = tomllib.load(f)
           version = data["package"]["version"]
           major, minor, patch = (int(x) for x in version.split(".", 2))
           next_version = f"{major}.{minor}.{patch + 1}"
-          with open("${GITHUB_OUTPUT}", "a", encoding="utf-8") as f:
+          output_path = os.environ["GITHUB_OUTPUT"]
+          with open(output_path, "a", encoding="utf-8") as f:
               f.write(f"next_version={next_version}\n")
           PY
       - name: Generate changelog
