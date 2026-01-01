@@ -1,3 +1,8 @@
+## [0.1.2] - 2026-01-01
+
+### 🐛 Bug Fixes
+
+- Drop tag prefix for cargo-release
 ## [0.1.1] - 2026-01-01
 
 ### 🚀 Features
@@ -48,3 +53,5 @@
 - Fallback to github token for release-plz
 - Switch to cargo-release and git-cliff
 - Use cargo-binstall main
+- Update changelog for v0.1.1
+- Release remark version 0.1.1
