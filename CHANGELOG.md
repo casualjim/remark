@@ -1,8 +1,18 @@
+## [0.1.3] - 2026-01-01
+
+### 📚 Documentation
+
+- Clarify release workflow and token
 ## [0.1.2] - 2026-01-01
 
 ### 🐛 Bug Fixes
 
 - Drop tag prefix for cargo-release
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.2
+- Release remark version 0.1.2
 ## [0.1.1] - 2026-01-01
 
 ### 🚀 Features
