@@ -64,6 +64,6 @@ jobs:
             echo "No changelog changes to commit"
             exit 0
           fi
-          git commit -m "chore: update changelog for v${{ steps.version.outputs.next_version }}"
+          git commit -m "chore: update changelog for v${{ steps.version.outputs.next_version }} [ci skip]"
       - name: Run cargo-release
         run: cargo release ${{ steps.version.outputs.next_version }} --no-confirm --no-publish --push --execute
