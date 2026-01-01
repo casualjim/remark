@@ -35,7 +35,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-binstall
-        uses: cargo-bins/cargo-binstall@v1
+        uses: cargo-bins/cargo-binstall@main
       - name: Install cargo-release and git-cliff
         run: cargo binstall -y cargo-release git-cliff
       - name: Compute next patch version
