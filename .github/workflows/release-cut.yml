@@ -45,8 +45,8 @@ jobs:
           import tomllib
           from pathlib import Path
 
-          cargo_toml = Path("Cargo.toml").read_bytes()
-          data = tomllib.loads(cargo_toml)
+          with open("Cargo.toml", "rb") as f:
+              data = tomllib.load(f)
           version = data["package"]["version"]
           major, minor, patch = (int(x) for x in version.split(".", 2))
           next_version = f"{major}.{minor}.{patch + 1}"
