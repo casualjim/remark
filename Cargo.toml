@@ -48,7 +48,6 @@ install-updater = true
 sign-commit = false
 sign-tag = false
 publish = false
-tag-prefix = "v"
 allow-branch = ["main"]
 
 [package.metadata.wix]
