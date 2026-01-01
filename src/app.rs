@@ -65,7 +65,7 @@ impl Config {
 
 fn print_help_and_exit() -> ! {
     eprintln!(
-        "remark\n\nUSAGE:\n  remark [--ref <notes-ref>] [--base <ref>] [--ignored]\n  remark <command> [<args>]\n\nOPTIONS:\n  --ref <notes-ref>   Notes ref to store reviews (default: remark.notesRef or {default_notes_ref})\n  --base <ref>        Base ref for base view (default: @{{upstream}} / main / master)\n  --ignored           Include gitignored files in the file list\n\nSUBCOMMANDS:\n  prompt             Render a collated review prompt\n  resolve            Resolve or unresolve comments\n  new                Start a new review session (new notes ref)\n  purge              Delete all remark notes refs\n\nKEYS (browse):\n  h / l or Left/Right focus files/diff\n  1/2/3/4             all/unstaged/staged/base\n  i                   toggle unified/side-by-side diff\n  [ / ]               less/more diff context\n  I                   toggle showing ignored files\n  R                   reload file list\n  Up/Down, j/k        navigate (focused pane)\n  PgUp/PgDn           scroll (focused pane)\n  Ctrl+U / Ctrl+D     page up/down (focused pane)\n  Ctrl+N / Ctrl+P     next/prev unreviewed file (diff pane)\n  v                   toggle reviewed (selected file)\n  Enter               focus diff (from files)\n  c                   add/edit comment (file or line)\n  d                   delete comment (file or line)\n  r                   resolve/unresolve comment\n  p                   open prompt editor\n  ?                   help\n  Esc                 dismiss overlay or quit\n\nTIP:\n  With focus on Files, press `c` to add/edit a file-level comment for the selected file.\n\nKEYS (comment editor):\n  Enter               newline\n  Shift+Enter / Ctrl+S accept comment and close\n  Esc                 cancel\n\nKEYS (prompt editor):\n  Enter               newline\n  Shift+Enter / Ctrl+S copy prompt and close\n  Esc                 close prompt\n",
+        "remark\n\nUSAGE:\n  remark [--ref <notes-ref>] [--base <ref>] [--ignored]\n  remark <command> [<args>]\n\nOPTIONS:\n  --ref <notes-ref>   Notes ref to store reviews (default: remark.notesRef or {default_notes_ref})\n  --base <ref>        Base ref for base view (default: @{{upstream}} / main / master)\n  --ignored           Include gitignored files in the file list\n\nSUBCOMMANDS:\n  prompt             Render a collated review prompt\n  resolve            Resolve or unresolve comments\n  new                Start a new review session (new notes ref)\n  purge              Delete all remark notes refs\n\nKEYS (browse):\n  h / l or Left/Right focus files/diff\n  1/2/3/4             all/unstaged/staged/base\n  i                   toggle unified/side-by-side diff\n  [ / ]               less/more diff context\n  I                   toggle showing ignored files\n  R                   reload file list\n  Up/Down, j/k        navigate (focused pane)\n  PgUp/PgDn           scroll (focused pane)\n  Ctrl+U / Ctrl+D     page up/down (focused pane)\n  Ctrl+N / Ctrl+P     next/prev unreviewed file (diff pane)\n  n                   next hunk (diff pane)\n  v                   toggle reviewed (selected file)\n  Enter               focus diff (from files)\n  c                   add/edit comment (file or line)\n  d                   delete comment (file or line)\n  r                   resolve/unresolve comment\n  p                   open prompt editor\n  ?                   help\n  Esc                 dismiss overlay or quit\n\nTIP:\n  With focus on Files, press `c` to add/edit a file-level comment for the selected file.\n\nKEYS (comment editor):\n  Enter               newline\n  Shift+Enter / Ctrl+S accept comment and close\n  Esc                 cancel\n\nKEYS (prompt editor):\n  Enter               newline\n  Shift+Enter / Ctrl+S copy prompt and close\n  Esc                 close prompt\n",
         default_notes_ref = crate::git::DEFAULT_NOTES_REF
     );
     std::process::exit(2);
@@ -501,6 +501,9 @@ impl App {
             KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.select_next_unreviewed(1)?;
             }
+            KeyCode::Char('n') if key.modifiers.is_empty() => {
+                self.jump_next_hunk();
+            }
             KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.select_next_unreviewed(-1)?;
             }
@@ -565,9 +568,6 @@ impl App {
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.accept_comment_and_move_on()?;
             }
-            KeyCode::Char('q') | KeyCode::Char('Q') => {
-                // Don't quit while editing; let Esc cancel/close.
-            }
             KeyCode::Up => self.editor_buffer.move_up(),
             KeyCode::Down => self.editor_buffer.move_down(),
             KeyCode::Left => self.editor_buffer.move_left(),
@@ -625,9 +625,6 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Char('q') | KeyCode::Char('Q') => {
-                // Don't quit while editing; let Esc close.
-            }
             KeyCode::Up => self.prompt_buffer.move_up(),
             KeyCode::Down => self.prompt_buffer.move_down(),
             KeyCode::Left => self.prompt_buffer.move_left(),
@@ -1815,6 +1812,22 @@ impl App {
             self.status = format!("Failed to save diff context: {e}");
         }
         Ok(())
+    }
+
+    fn jump_next_hunk(&mut self) {
+        if self.diff_rows.is_empty() {
+            return;
+        }
+        let start = self.diff_cursor.saturating_add(1);
+        if start >= self.diff_rows.len() {
+            return;
+        }
+        if let Some(rel) = self.diff_rows[start..]
+            .iter()
+            .position(|r| matches!(r, RenderRow::Section { .. }))
+        {
+            self.diff_cursor = start + rel;
+        }
     }
 
     fn build_unified_rows(

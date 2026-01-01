@@ -751,6 +751,7 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect) {
         Line::from("  PgUp/Dn           Page up / down"),
         Line::from("  Ctrl+U / Ctrl+D   Page up / down"),
         Line::from("  Ctrl+N / Ctrl+P   Next/prev unreviewed file"),
+        Line::from("  n                 Next hunk"),
         Line::from("  i                 Toggle unified / side-by-side"),
         Line::from("  [ / ]             Less/more diff context"),
         Line::from("  R                 Reload file list"),

@@ -9,7 +9,7 @@
 - `src/`: Rust source code (single binary crate; entrypoint in `src/main.rs`).
 - `.github/workflows/`: CI and release automation (Rust checks, release-plz, cargo-dist).
 - `wix/`: Windows installer metadata used by `cargo-dist`/WiX.
-- `release-plz.toml`, `dist-workspace.toml`: release configuration (tagging, artifacts).
+- `dist-workspace.toml`: release configuration (artifacts).
 
 ## Build, Test, and Development Commands
 
@@ -42,4 +42,4 @@
 
 ## Release Notes (Maintainers)
 
-Releases are cut via the `Cut Release` workflow, which runs `git-cliff` to update `CHANGELOG.md` and then uses `cargo-release` to tag `vX.Y.Z`. Pushing the tag triggers `cargo-dist` to publish GitHub Release artifacts.
+Releases are cut automatically after CI passes on pushes to `main`. The `Cut Release` workflow runs `git-cliff` to update `CHANGELOG.md` and then uses `cargo-release` to bump the patch version and tag `vX.Y.Z`. Pushing the tag triggers `cargo-dist` to publish GitHub Release artifacts. There is no release PR flow.

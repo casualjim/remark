@@ -1,16 +1,23 @@
 name: Cut Release
 
 on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+    branches:
+      - main
   workflow_dispatch:
-    inputs:
-      version:
-        description: "SemVer to release (e.g. 0.2.0 or 1.0.0-rc.1)"
-        required: true
-        type: string
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
 
 jobs:
   cut-release:
     runs-on: ubuntu-latest
+    if: github.actor != 'github-actions[bot]' && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success')
     permissions:
       contents: write
     steps:
@@ -19,15 +26,35 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
-          token: ${{ secrets.RELEASE_TOKEN || secrets.RELEASE_PLZ_TOKEN || github.token }}
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+      - name: Configure git identity
+        run: |
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-      - name: Install cargo-release
-        run: cargo install cargo-release --locked
-      - name: Install git-cliff
-        run: cargo install git-cliff --locked
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@v1
+      - name: Install cargo-release and git-cliff
+        run: cargo binstall -y cargo-release git-cliff
+      - name: Compute next patch version
+        id: version
+        run: |
+          python3 - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          cargo_toml = Path("Cargo.toml").read_bytes()
+          data = tomllib.loads(cargo_toml)
+          version = data["package"]["version"]
+          major, minor, patch = (int(x) for x in version.split(".", 2))
+          next_version = f"{major}.{minor}.{patch + 1}"
+          with open("${GITHUB_OUTPUT}", "a", encoding="utf-8") as f:
+              f.write(f"next_version={next_version}\n")
+          PY
       - name: Generate changelog
-        run: git-cliff --tag v${{ inputs.version }} -o CHANGELOG.md
+        run: git-cliff --tag v${{ steps.version.outputs.next_version }} -o CHANGELOG.md
       - name: Commit changelog
         run: |
           git add CHANGELOG.md
@@ -35,10 +62,6 @@ jobs:
             echo "No changelog changes to commit"
             exit 0
           fi
-          git commit -m "chore: update changelog for v${{ inputs.version }}"
+          git commit -m "chore: update changelog for v${{ steps.version.outputs.next_version }}"
       - name: Run cargo-release
-        run: cargo release ${{ inputs.version }} --no-confirm --no-publish --no-push --execute
-      - name: Push release commit and tag
-        run: |
-          git push origin HEAD
-          git push origin --tags
+        run: cargo release ${{ steps.version.outputs.next_version }} --no-confirm --no-publish --push --execute
