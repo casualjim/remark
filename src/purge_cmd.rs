@@ -7,8 +7,8 @@ pub fn run() -> Result<()> {
 
     // `remark purge --yes`
     let mut confirm = false;
-    let mut args = std::env::args().skip(2);
-    while let Some(arg) = args.next() {
+    let args = std::env::args().skip(2);
+    for arg in args {
         match arg.as_str() {
             "--yes" | "-y" => confirm = true,
             "-h" | "--help" => {
