@@ -3,6 +3,11 @@
 ### 🐛 Bug Fixes
 
 - Avoid credential override when pushing tags
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.9 [ci skip]
+- Release remark version 0.1.9
 ## [0.1.8] - 2026-01-02
 
 ### 🐛 Bug Fixes
