@@ -859,12 +859,7 @@ fn draw_comment_list(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
                     format!("{side}:{line}")
                 }
             };
-            let preview = entry
-                .body
-                .lines()
-                .next()
-                .unwrap_or("")
-                .trim_end();
+            let preview = entry.body.lines().next().unwrap_or("").trim_end();
             let mut line = format!("{mark} {status} {loc} {} - {preview}", entry.path);
             if line.len() > max_width {
                 line.truncate(max_width);
@@ -881,7 +876,10 @@ fn draw_comment_list(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
     let selected = if s.comment_list.is_empty() {
         None
     } else {
-        Some(s.comment_list_selected.min(s.comment_list.len().saturating_sub(1)))
+        Some(
+            s.comment_list_selected
+                .min(s.comment_list.len().saturating_sub(1)),
+        )
     };
     let scroll = selected
         .map(|sel| sel.saturating_add(1).saturating_sub(height))
@@ -1033,10 +1031,7 @@ fn render_wrapped_textarea(f: &mut ratatui::Frame, area: Rect, textarea: &TextAr
     }
 }
 
-fn wrap_textarea_lines(
-    textarea: &TextArea<'_>,
-    width: u16,
-) -> (Vec<Line<'static>>, usize, usize) {
+fn wrap_textarea_lines(textarea: &TextArea<'_>, width: u16) -> (Vec<Line<'static>>, usize, usize) {
     let width = width.max(1) as usize;
     let (cursor_row, cursor_col) = textarea.cursor();
     let cursor_style = textarea.cursor_style();
@@ -1056,10 +1051,11 @@ fn wrap_textarea_lines(
         }
     };
 
-    let push_line = |out: &mut Vec<Line<'static>>, spans: &mut Vec<Span<'static>>, text_buf: &mut String| {
-        flush_text(spans, text_buf);
-        out.push(Line::from(std::mem::take(spans)));
-    };
+    let push_line =
+        |out: &mut Vec<Line<'static>>, spans: &mut Vec<Span<'static>>, text_buf: &mut String| {
+            flush_text(spans, text_buf);
+            out.push(Line::from(std::mem::take(spans)));
+        };
 
     for (row_idx, line) in textarea.lines().iter().enumerate() {
         let mut col_idx = 0usize;
