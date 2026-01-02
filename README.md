@@ -79,10 +79,16 @@ Optional flags:
 
 ```bash
 remark --ref refs/notes/remark --base refs/heads/main
+remark --view staged
+remark --file src/lib.rs --line 42 --side new
 ```
 
 - `--ref`: which notes ref to store reviews under (default: `refs/notes/remark`)
 - `--base`: base ref used by the “base” view (default: `@{upstream}` then `main`/`master` heuristics)
+- `--view`: start in view `all`, `unstaged`, `staged`, or `base`
+- `--file`: preselect a file when launching the UI
+- `--line`: preselect a 1-based line in the selected file (requires `--file`)
+- `--side`: which side for line selection (`old` or `new`, default: `new`)
 
 ### Headless prompt output
 
