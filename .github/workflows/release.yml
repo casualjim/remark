@@ -129,6 +129,15 @@ jobs:
           fi
       - name: "Install Rust toolchain"
         uses: "dtolnay/rust-toolchain@stable"
+      - name: "Install WiX (Windows MSI)"
+        if: "${{ runner.os == 'Windows' }}"
+        run: |
+          choco install wixtoolset -y
+          $wixBin = "C:\\Program Files (x86)\\WiX Toolset v3.11\\bin"
+          if (Test-Path $wixBin) {
+            Add-Content -Path $env:GITHUB_PATH -Value $wixBin
+          }
+        shell: "pwsh"
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest
