@@ -10,19 +10,20 @@ authors = ["Ivan Porto Carrero <ivan@flanders.co.nz>"]
 
 [dependencies]
 anyhow = "1"
-crossterm = "0.29"
-gix = { version = "0.76", features = ["revision", "tree-editor"] }
-gix-actor = "0.36"
-gix-date = "0.11"
-gix-dir = "0.18"
+crossterm = "0.28"
+gix = { version = "0.77", features = ["revision", "tree-editor"] }
+gix-actor = "0.37.0"
+gix-date = "0.12.0"
+gix-dir = "0.19.0"
 gix-hash = "0.21"
-gix-object = "0.53"
-gix-ref = "0.56"
-ratatui = "0.30.0"
+gix-object = "0.54.0"
+gix-ref = "0.57.0"
+ratatui = "0.29"
+tui-textarea = "0.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 smallvec = "1"
-gix-diff = "0.56"
+gix-diff = "0.57.0"
 syntastica = "0.6"
 syntastica-parsers = { version = "0.6", features = ["all"] }
 syntastica-themes = "0.6"

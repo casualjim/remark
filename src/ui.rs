@@ -16,11 +16,12 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use tui_textarea::TextArea;
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::{
-    CommentLocator, CommentTarget, DiffViewMode, FileChangeKind, FileEntry, Focus, Mode, RenderRow,
-    SideBySideRow,
+    CommentListEntry, CommentLocator, CommentTarget, DiffViewMode, FileChangeKind, FileEntry,
+    Focus, Mode, RenderRow, SideBySideRow,
 };
 use crate::file_tree::FileTreeRow;
 use crate::git::ViewKind;
@@ -79,11 +80,14 @@ pub struct LayoutRects {
 }
 
 pub fn layout(area: Rect) -> LayoutRects {
-    let [files, diff] = Layout::default()
+    let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(40), Constraint::Min(1)])
-        .areas(area);
-    LayoutRects { files, diff }
+        .split(area);
+    LayoutRects {
+        files: chunks[0],
+        diff: chunks[1],
+    }
 }
 
 pub struct DrawState<'a> {
@@ -108,21 +112,25 @@ pub struct DrawState<'a> {
     pub reviewed_files: &'a HashSet<String>,
 
     pub editor_target: Option<&'a CommentTarget>,
-    pub editor_buffer: &'a NoteBuffer,
-    pub prompt_buffer: &'a NoteBuffer,
-    pub prompt_scroll: u16,
+    pub editor_buffer: &'a TextArea<'static>,
+    pub prompt_buffer: &'a TextArea<'static>,
 
     pub status: &'a str,
     pub show_help: bool,
     pub show_prompt: bool,
+    pub comment_list: &'a [CommentListEntry],
+    pub comment_list_selected: usize,
+    pub comment_list_marked: &'a HashSet<usize>,
 }
 
 pub fn draw(f: &mut ratatui::Frame, s: DrawState<'_>) {
     let outer = f.area();
-    let [main, footer] = Layout::default()
+    let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
-        .areas(outer);
+        .split(outer);
+    let main = chunks[0];
+    let footer = chunks[1];
 
     let rects = layout(main);
     draw_files(f, rects.files, &s);
@@ -137,6 +145,9 @@ pub fn draw(f: &mut ratatui::Frame, s: DrawState<'_>) {
     }
     if s.mode == Mode::EditComment {
         draw_comment_editor(f, rects.diff, &s);
+    }
+    if s.mode == Mode::CommentList {
+        draw_comment_list(f, outer, &s);
     }
 }
 
@@ -697,6 +708,10 @@ fn draw_footer(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
             let s = "prompt editor  (Shift+Enter/Ctrl+S copy)  (Esc close)".to_string();
             fit_with_ellipsis(&s, area.width as usize)
         }
+        Mode::CommentList => {
+            let s = "comment list  (Enter select, Shift+Enter jump, Shift+R resolve, Delete discard, Esc close)".to_string();
+            fit_with_ellipsis(&s, area.width as usize)
+        }
     };
 
     // Notes are written immediately on accept/delete/resolve; we don't display an "unsaved" state.
@@ -758,6 +773,7 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect) {
         Line::from("  c                 Add/edit comment (file or line)"),
         Line::from("  d                 Delete comment (file or line)"),
         Line::from("  r                 Resolve/unresolve comment"),
+        Line::from("  Shift+C           Open comment list"),
         Line::from(""),
         Line::from("Review"),
         Line::from("  p                 Open prompt editor"),
@@ -772,6 +788,14 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect) {
         Line::from("Prompt editor"),
         Line::from("  Shift+Enter/Ctrl+S  Copy prompt and close"),
         Line::from("  Esc               Close prompt"),
+        Line::from(""),
+        Line::from("Comment list"),
+        Line::from("  Up/Down, j/k      Move selection"),
+        Line::from("  Enter             Select/unselect"),
+        Line::from("  Shift+Enter       Jump to location"),
+        Line::from("  Shift+R           Resolve file comments"),
+        Line::from("  Delete            Discard file comments"),
+        Line::from("  Esc               Close list"),
         Line::from(""),
         Line::from("Help"),
         Line::from("  ? or Esc          Close this help"),
@@ -798,32 +822,75 @@ fn draw_prompt(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
         _ => "LLM Prompt Preview (collated)".to_string(),
     };
     let block = Block::default().borders(Borders::ALL).title(title);
-
-    let text = Text::from(
-        s.prompt_buffer
-            .lines
-            .iter()
-            .map(|l| Line::from(Span::raw(l.clone())))
-            .collect::<Vec<_>>(),
-    );
-    let para = Paragraph::new(text)
-        .wrap(Wrap { trim: false })
-        .scroll((s.prompt_scroll, 0));
     let inner = block.inner(popup);
     f.render_widget(block, popup);
-    f.render_widget(para, inner);
+    render_wrapped_textarea(f, inner, s.prompt_buffer);
+}
 
-    if s.mode == Mode::EditPrompt {
-        let rel_row = s
-            .prompt_buffer
-            .cursor_row
-            .saturating_sub(s.prompt_scroll as usize) as u16;
-        let cur_y = inner.y + rel_row;
-        let cur_x = inner.x + s.prompt_buffer.cursor_col as u16;
-        if cur_y < inner.y + inner.height && cur_x < inner.x + inner.width {
-            f.set_cursor_position((cur_x, cur_y));
+fn draw_comment_list(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
+    let popup = centered_rect(80, 80, area);
+    f.render_widget(Clear, popup);
+    let block = Block::default().borders(Borders::ALL).title(
+        "Comments  (Enter select, Shift+Enter jump, Shift+R resolve, Delete discard, Esc close)",
+    );
+
+    let inner = block.inner(popup);
+    let max_width = inner.width.max(1) as usize;
+    let height = inner.height.max(1) as usize;
+
+    let mut items = Vec::new();
+    if s.comment_list.is_empty() {
+        items.push(ListItem::new(Line::from("No comments.")));
+    } else {
+        for (idx, entry) in s.comment_list.iter().enumerate() {
+            let mark = if s.comment_list_marked.contains(&idx) {
+                "[x]"
+            } else {
+                "[ ]"
+            };
+            let status = if entry.resolved { "R" } else { " " };
+            let loc = match entry.locator {
+                CommentLocator::File => "file".to_string(),
+                CommentLocator::Line { side, line } => {
+                    let side = match side {
+                        crate::review::LineSide::Old => "old",
+                        crate::review::LineSide::New => "new",
+                    };
+                    format!("{side}:{line}")
+                }
+            };
+            let preview = entry.body.lines().next().unwrap_or("").trim_end();
+            let mut line = format!("{mark} {status} {loc} {} - {preview}", entry.path);
+            if line.len() > max_width {
+                line.truncate(max_width);
+            }
+            let style = if entry.resolved {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default()
+            };
+            items.push(ListItem::new(Line::from(Span::styled(line, style))));
         }
     }
+
+    let selected = if s.comment_list.is_empty() {
+        None
+    } else {
+        Some(
+            s.comment_list_selected
+                .min(s.comment_list.len().saturating_sub(1)),
+        )
+    };
+    let scroll = selected
+        .map(|sel| sel.saturating_add(1).saturating_sub(height))
+        .unwrap_or(0);
+    let mut state = ListState::default()
+        .with_selected(selected)
+        .with_offset(scroll);
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    f.render_stateful_widget(list, popup, &mut state);
 }
 
 fn draw_comment_editor(f: &mut ratatui::Frame, diff_area: Rect, s: &DrawState<'_>) {
@@ -884,22 +951,7 @@ fn draw_comment_editor(f: &mut ratatui::Frame, diff_area: Rect, s: &DrawState<'_
         .border_style(Style::default().fg(Color::Yellow));
     let inner = block.inner(popup);
     f.render_widget(block, popup);
-
-    let text = Text::from(
-        s.editor_buffer
-            .lines
-            .iter()
-            .map(|l| Line::from(Span::raw(l.clone())))
-            .collect::<Vec<_>>(),
-    );
-    let para = Paragraph::new(text).wrap(Wrap { trim: false });
-    f.render_widget(para, inner);
-
-    let cur_y = inner.y + s.editor_buffer.cursor_row as u16;
-    let cur_x = inner.x + s.editor_buffer.cursor_col as u16;
-    if cur_y < inner.y + inner.height && cur_x < inner.x + inner.width {
-        f.set_cursor_position((cur_x, cur_y));
-    }
+    render_wrapped_textarea(f, inner, s.editor_buffer);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
@@ -921,137 +973,151 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
-#[derive(Debug, Clone)]
-pub struct NoteBuffer {
-    pub(crate) lines: Vec<String>,
-    pub(crate) cursor_row: usize,
-    pub(crate) cursor_col: usize,
+pub fn textarea_from_string(text: &str) -> TextArea<'static> {
+    let trimmed = text.trim_end_matches(['\r', '\n']);
+    let lines = if trimmed.is_empty() {
+        vec![String::new()]
+    } else {
+        trimmed.split('\n').map(|l| l.to_string()).collect()
+    };
+    let mut textarea = TextArea::new(lines);
+    configure_textarea(&mut textarea);
+    textarea
 }
 
-impl NoteBuffer {
-    pub fn new() -> Self {
-        Self {
-            lines: vec![String::new()],
-            cursor_row: 0,
-            cursor_col: 0,
-        }
+pub fn empty_textarea() -> TextArea<'static> {
+    textarea_from_string("")
+}
+
+pub fn textarea_contents(textarea: &TextArea<'_>) -> String {
+    textarea.lines().join("\n")
+}
+
+fn configure_textarea(textarea: &mut TextArea<'static>) {
+    textarea.set_cursor_line_style(Style::default().bg(Color::DarkGray));
+    textarea.set_cursor_style(Style::default().fg(Color::Black).bg(Color::Yellow));
+}
+
+fn render_wrapped_textarea(f: &mut ratatui::Frame, area: Rect, textarea: &TextArea<'_>) {
+    let width = area.width.max(1);
+    let height = area.height.max(1) as usize;
+    let (lines, cursor_row, cursor_col) = wrap_textarea_lines(textarea, width);
+
+    let mut scroll = 0usize;
+    if cursor_row >= scroll + height {
+        scroll = cursor_row + 1 - height;
+    }
+    if cursor_row < scroll {
+        scroll = cursor_row;
     }
 
-    pub fn from_string(s: String) -> Self {
-        let mut lines = s
-            .trim_end_matches(['\r', '\n'])
-            .split('\n')
-            .map(|l| l.to_string())
-            .collect::<Vec<_>>();
-        if lines.is_empty() {
-            lines.push(String::new());
+    let end = (scroll + height).min(lines.len());
+    let visible = if scroll < lines.len() {
+        lines[scroll..end].to_vec()
+    } else {
+        Vec::new()
+    };
+
+    let para = Paragraph::new(Text::from(visible));
+    f.render_widget(para, area);
+
+    if cursor_row >= scroll {
+        let rel_row = cursor_row - scroll;
+        let cur_y = area.y + rel_row as u16;
+        let cur_x = area.x + cursor_col as u16;
+        if cur_y < area.y + area.height && cur_x < area.x + area.width {
+            f.set_cursor_position((cur_x, cur_y));
         }
-        Self {
-            lines,
-            cursor_row: 0,
-            cursor_col: 0,
-        }
-    }
-
-    pub fn as_string(&self) -> String {
-        self.lines.join("\n")
-    }
-
-    pub fn insert_char(&mut self, c: char) {
-        let line = &mut self.lines[self.cursor_row];
-        let idx = byte_index(line, self.cursor_col);
-        line.insert(idx, c);
-        self.cursor_col += 1;
-    }
-
-    pub fn insert_newline(&mut self) {
-        let line = &mut self.lines[self.cursor_row];
-        let idx = byte_index(line, self.cursor_col);
-        let rest = line[idx..].to_string();
-        line.truncate(idx);
-        self.lines.insert(self.cursor_row + 1, rest);
-        self.cursor_row += 1;
-        self.cursor_col = 0;
-    }
-
-    pub fn backspace(&mut self) -> bool {
-        if self.cursor_col > 0 {
-            let line = &mut self.lines[self.cursor_row];
-            let remove_at = byte_index(line, self.cursor_col - 1);
-            let next = byte_index(line, self.cursor_col);
-            line.replace_range(remove_at..next, "");
-            self.cursor_col -= 1;
-            return true;
-        }
-
-        if self.cursor_row > 0 {
-            let current = self.lines.remove(self.cursor_row);
-            self.cursor_row -= 1;
-            let prev = &mut self.lines[self.cursor_row];
-            let prev_len = prev.chars().count();
-            prev.push_str(&current);
-            self.cursor_col = prev_len;
-            return true;
-        }
-
-        false
-    }
-
-    pub fn move_left(&mut self) {
-        if self.cursor_col > 0 {
-            self.cursor_col -= 1;
-            return;
-        }
-        if self.cursor_row > 0 {
-            self.cursor_row -= 1;
-            self.cursor_col = self.lines[self.cursor_row].chars().count();
-        }
-    }
-
-    pub fn move_right(&mut self) {
-        let line_len = self.lines[self.cursor_row].chars().count();
-        if self.cursor_col < line_len {
-            self.cursor_col += 1;
-            return;
-        }
-        if self.cursor_row + 1 < self.lines.len() {
-            self.cursor_row += 1;
-            self.cursor_col = 0;
-        }
-    }
-
-    pub fn move_up(&mut self) {
-        if self.cursor_row == 0 {
-            return;
-        }
-        self.cursor_row -= 1;
-        self.cursor_col = self
-            .cursor_col
-            .min(self.lines[self.cursor_row].chars().count());
-    }
-
-    pub fn move_down(&mut self) {
-        if self.cursor_row + 1 >= self.lines.len() {
-            return;
-        }
-        self.cursor_row += 1;
-        self.cursor_col = self
-            .cursor_col
-            .min(self.lines[self.cursor_row].chars().count());
-    }
-
-    pub fn move_line_start(&mut self) {
-        self.cursor_col = 0;
-    }
-
-    pub fn move_line_end(&mut self) {
-        self.cursor_col = self.lines[self.cursor_row].chars().count();
     }
 }
 
-fn byte_index(s: &str, char_idx: usize) -> usize {
-    s.char_indices()
-        .nth(char_idx)
-        .map(|(i, _)| i)
-        .unwrap_or(s.len())
+fn wrap_textarea_lines(textarea: &TextArea<'_>, width: u16) -> (Vec<Line<'static>>, usize, usize) {
+    let width = width.max(1) as usize;
+    let (cursor_row, cursor_col) = textarea.cursor();
+    let cursor_style = textarea.cursor_style();
+
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut text_buf = String::new();
+    let mut visual_row = 0usize;
+    let mut cur_width = 0usize;
+    let mut cursor_vis_row = 0usize;
+    let mut cursor_vis_col = 0usize;
+    let mut cursor_set = false;
+
+    let flush_text = |spans: &mut Vec<Span<'static>>, text_buf: &mut String| {
+        if !text_buf.is_empty() {
+            spans.push(Span::raw(std::mem::take(text_buf)));
+        }
+    };
+
+    let push_line =
+        |out: &mut Vec<Line<'static>>, spans: &mut Vec<Span<'static>>, text_buf: &mut String| {
+            flush_text(spans, text_buf);
+            out.push(Line::from(std::mem::take(spans)));
+        };
+
+    for (row_idx, line) in textarea.lines().iter().enumerate() {
+        let mut col_idx = 0usize;
+        if line.is_empty() {
+            if row_idx == cursor_row && cursor_col == 0 && !cursor_set {
+                flush_text(&mut spans, &mut text_buf);
+                cursor_vis_row = visual_row;
+                cursor_vis_col = cur_width;
+                spans.push(Span::styled(" ".to_string(), cursor_style));
+                cursor_set = true;
+            }
+            push_line(&mut out, &mut spans, &mut text_buf);
+            cur_width = 0;
+            visual_row += 1;
+            continue;
+        }
+
+        for ch in line.chars() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(1);
+            if ch_width > 0 && cur_width > 0 && cur_width + ch_width > width {
+                push_line(&mut out, &mut spans, &mut text_buf);
+                cur_width = 0;
+                visual_row += 1;
+            }
+
+            if row_idx == cursor_row && col_idx == cursor_col && !cursor_set {
+                flush_text(&mut spans, &mut text_buf);
+                cursor_vis_row = visual_row;
+                cursor_vis_col = cur_width;
+                spans.push(Span::styled(ch.to_string(), cursor_style));
+                cursor_set = true;
+            } else {
+                text_buf.push(ch);
+            }
+
+            cur_width = cur_width.saturating_add(ch_width);
+            col_idx += 1;
+        }
+
+        if row_idx == cursor_row && col_idx == cursor_col && !cursor_set {
+            if cur_width >= width {
+                push_line(&mut out, &mut spans, &mut text_buf);
+                cur_width = 0;
+                visual_row += 1;
+            }
+            flush_text(&mut spans, &mut text_buf);
+            cursor_vis_row = visual_row;
+            cursor_vis_col = cur_width;
+            spans.push(Span::styled(" ".to_string(), cursor_style));
+            cursor_set = true;
+        }
+
+        push_line(&mut out, &mut spans, &mut text_buf);
+        cur_width = 0;
+        visual_row += 1;
+    }
+
+    if out.is_empty() {
+        out.push(Line::from(""));
+        cursor_vis_row = 0;
+        cursor_vis_col = 0;
+    }
+
+    (out, cursor_vis_row, cursor_vis_col)
 }

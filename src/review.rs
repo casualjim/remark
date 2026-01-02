@@ -73,6 +73,8 @@ pub struct FileReview {
     pub comments: BTreeMap<LineKey, Comment>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub reviewed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,6 +325,7 @@ pub fn decode_file_note(note: &str) -> Option<FileReview> {
                     })
                     .collect(),
                 reviewed: false,
+                reviewed_hash: None,
             });
         }
     }
@@ -445,6 +448,7 @@ mod tests {
                 resolved: true,
             }),
             reviewed: true,
+            reviewed_hash: Some("abc123".to_string()),
             ..Default::default()
         };
         fr.comments.insert(
@@ -476,6 +480,7 @@ mod tests {
         );
         assert!(decoded.file_comment.as_ref().unwrap().resolved);
         assert!(decoded.reviewed);
+        assert_eq!(decoded.reviewed_hash.as_deref(), Some("abc123"));
         assert_eq!(decoded.comments.len(), 2);
         assert_eq!(
             decoded

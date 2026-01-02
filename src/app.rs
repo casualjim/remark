@@ -6,11 +6,13 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use gix::ObjectId;
+use gix_hash::{Kind, hasher};
+use tui_textarea::TextArea;
 
 use crate::file_tree::FileTreeView;
 use crate::git::ViewKind;
 use crate::highlight::Highlighter;
-use crate::review::{FileReview, LineSide, Review};
+use crate::review::{FileReview, LineKey, LineSide, Review};
 use unicode_width::UnicodeWidthStr;
 
 const CONFIG_DIFF_VIEW_KEY: &str = "remark.diffView";
@@ -20,17 +22,29 @@ const MIN_DIFF_CONTEXT: u32 = 0;
 const MAX_DIFF_CONTEXT: u32 = 20;
 
 #[derive(Debug, Clone)]
+struct JumpTarget {
+    path: String,
+    line: Option<LineKey>,
+}
+
+#[derive(Debug, Clone)]
 struct Config {
     notes_ref: String,
     base_ref: Option<String>,
     show_ignored: bool,
+    view: ViewKind,
+    jump_target: Option<JumpTarget>,
 }
 
 impl Config {
-    fn from_env(repo: &gix::Repository) -> Self {
+    fn from_env(repo: &gix::Repository) -> Result<Self> {
         let mut notes_ref = crate::git::read_notes_ref(repo);
         let mut base_ref: Option<String> = crate::git::default_base_ref(repo);
         let mut show_ignored = false;
+        let mut view = ViewKind::All;
+        let mut jump_path: Option<String> = None;
+        let mut jump_line: Option<u32> = None;
+        let mut jump_side: Option<LineSide> = None;
 
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -48,6 +62,30 @@ impl Config {
                 "--ignored" => {
                     show_ignored = true;
                 }
+                "--view" => {
+                    if let Some(v) = args.next() {
+                        view = parse_view_kind(&v)?;
+                    }
+                }
+                "--file" => {
+                    if let Some(v) = args.next() {
+                        jump_path = Some(v);
+                    }
+                }
+                "--line" => {
+                    if let Some(v) = args.next() {
+                        let parsed = v.parse::<u32>().context("parse --line")?;
+                        if parsed == 0 {
+                            anyhow::bail!("--line must be 1-based");
+                        }
+                        jump_line = Some(parsed);
+                    }
+                }
+                "--side" => {
+                    if let Some(v) = args.next() {
+                        jump_side = Some(parse_line_side(&v)?);
+                    }
+                }
                 "-h" | "--help" => {
                     print_help_and_exit();
                 }
@@ -55,17 +93,51 @@ impl Config {
             }
         }
 
-        Self {
+        if (jump_line.is_some() || jump_side.is_some()) && jump_path.is_none() {
+            anyhow::bail!("--line/--side requires --file <path>");
+        }
+        if jump_line.is_none() && jump_side.is_some() {
+            anyhow::bail!("--side requires --line <n>");
+        }
+
+        let mut jump_target = jump_path.map(|mut path| {
+            if let Some(stripped) = path.strip_prefix("./") {
+                path = stripped.to_string();
+            }
+            if let Some(wd) = repo.workdir()
+                && std::path::Path::new(&path).is_absolute()
+                && let Ok(rel) = std::path::Path::new(&path).strip_prefix(wd)
+            {
+                path = rel.to_string_lossy().to_string();
+            }
+
+            let line = jump_line.map(|line| LineKey {
+                side: jump_side.unwrap_or(LineSide::New),
+                line,
+            });
+
+            JumpTarget { path, line }
+        });
+
+        if let Some(target) = jump_target.as_mut()
+            && target.path.is_empty()
+        {
+            anyhow::bail!("--file <path> must not be empty");
+        }
+
+        Ok(Self {
             notes_ref,
             base_ref,
             show_ignored,
-        }
+            view,
+            jump_target,
+        })
     }
 }
 
 fn print_help_and_exit() -> ! {
     eprintln!(
-        "remark\n\nUSAGE:\n  remark [--ref <notes-ref>] [--base <ref>] [--ignored]\n  remark <command> [<args>]\n\nOPTIONS:\n  --ref <notes-ref>   Notes ref to store reviews (default: remark.notesRef or {default_notes_ref})\n  --base <ref>        Base ref for base view (default: @{{upstream}} / main / master)\n  --ignored           Include gitignored files in the file list\n\nSUBCOMMANDS:\n  prompt             Render a collated review prompt\n  resolve            Resolve or unresolve comments\n  new                Start a new review session (new notes ref)\n  purge              Delete all remark notes refs\n\nKEYS (browse):\n  h / l or Left/Right focus files/diff\n  1/2/3/4             all/unstaged/staged/base\n  i                   toggle unified/side-by-side diff\n  [ / ]               less/more diff context\n  I                   toggle showing ignored files\n  R                   reload file list\n  Up/Down, j/k        navigate (focused pane)\n  PgUp/PgDn           scroll (focused pane)\n  Ctrl+U / Ctrl+D     page up/down (focused pane)\n  Ctrl+N / Ctrl+P     next/prev unreviewed file (diff pane)\n  n                   next hunk (diff pane)\n  v                   toggle reviewed (selected file)\n  Enter               focus diff (from files)\n  c                   add/edit comment (file or line)\n  d                   delete comment (file or line)\n  r                   resolve/unresolve comment\n  p                   open prompt editor\n  ?                   help\n  Esc                 dismiss overlay or quit\n\nTIP:\n  With focus on Files, press `c` to add/edit a file-level comment for the selected file.\n\nKEYS (comment editor):\n  Enter               newline\n  Shift+Enter / Ctrl+S accept comment and close\n  Esc                 cancel\n\nKEYS (prompt editor):\n  Enter               newline\n  Shift+Enter / Ctrl+S copy prompt and close\n  Esc                 close prompt\n",
+        "remark\n\nUSAGE:\n  remark [--ref <notes-ref>] [--base <ref>] [--ignored] [--view <all|staged|unstaged|base>] [--file <path> [--line <n> --side <old|new>]]\n  remark <command> [<args>]\n\nOPTIONS:\n  --ref <notes-ref>   Notes ref to store reviews (default: remark.notesRef or {default_notes_ref})\n  --base <ref>        Base ref for base view (default: @{{upstream}} / main / master)\n  --ignored           Include gitignored files in the file list\n  --view <kind>       Start in view (all/unstaged/staged/base)\n  --file <path>       Preselect a file when launching the UI\n  --line <n>          Preselect a 1-based line (requires --file)\n  --side <old|new>    Which side for line (default: new)\n\nSUBCOMMANDS:\n  prompt             Render a collated review prompt\n  resolve            Resolve or unresolve comments\n  new                Start a new review session (new notes ref)\n  purge              Delete all remark notes refs\n\nKEYS (browse):\n  h / l or Left/Right focus files/diff\n  1/2/3/4             all/unstaged/staged/base\n  i                   toggle unified/side-by-side diff\n  [ / ]               less/more diff context\n  I                   toggle showing ignored files\n  R                   reload file list\n  Up/Down, j/k        navigate (focused pane)\n  PgUp/PgDn           scroll (focused pane)\n  Ctrl+U / Ctrl+D     page up/down (focused pane)\n  Ctrl+N / Ctrl+P     next/prev unreviewed file (diff pane)\n  n                   next hunk (diff pane)\n  v                   toggle reviewed (selected file)\n  Enter               focus diff (from files)\n  c                   add/edit comment (file or line)\n  d                   delete comment (file or line)\n  r                   resolve/unresolve comment\n  Shift+C             open comment list\n  p                   open prompt editor\n  ?                   help\n  Esc                 dismiss overlay or quit\n\nTIP:\n  With focus on Files, press `c` to add/edit a file-level comment for the selected file.\n\nKEYS (comment editor):\n  Enter               newline\n  Shift+Enter / Ctrl+S accept comment and close\n  Esc                 cancel\n\nKEYS (comment list):\n  Up/Down, j/k        move selection\n  Enter               select/unselect item\n  Shift+Enter         jump to location\n  Shift+R             resolve file comments\n  Delete              discard file comments\n  Esc                 close list\n\nKEYS (prompt editor):\n  Enter               newline\n  Shift+Enter / Ctrl+S copy prompt and close\n  Esc                 close prompt\n",
         default_notes_ref = crate::git::DEFAULT_NOTES_REF
     );
     std::process::exit(2);
@@ -76,6 +148,7 @@ pub(crate) enum Mode {
     Browse,
     EditComment,
     EditPrompt,
+    CommentList,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +167,14 @@ pub(crate) enum CommentLocator {
 pub(crate) struct CommentTarget {
     pub(crate) path: String,
     pub(crate) locator: CommentLocator,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CommentListEntry {
+    pub(crate) path: String,
+    pub(crate) locator: CommentLocator,
+    pub(crate) body: String,
+    pub(crate) resolved: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -137,11 +218,18 @@ enum KeepLine {
 pub fn run() -> Result<()> {
     let repo = gix::discover(std::env::current_dir().context("get current directory")?)
         .context("discover git repository")?;
-    let config = Config::from_env(&repo);
+    let config = Config::from_env(&repo)?;
 
     let mut ui = crate::ui::Ui::new()?;
 
-    let mut app = App::new(repo, config.notes_ref, config.base_ref, config.show_ignored)?;
+    let mut app = App::new(
+        repo,
+        config.notes_ref,
+        config.base_ref,
+        config.show_ignored,
+        config.view,
+        config.jump_target,
+    )?;
     let res = app.run_loop(&mut ui);
 
     ui.restore().ok();
@@ -153,6 +241,7 @@ struct App {
     notes_ref: String,
     base_ref: Option<String>,
     show_ignored: bool,
+    jump_target: Option<JumpTarget>,
 
     view: ViewKind,
     focus: Focus,
@@ -182,14 +271,15 @@ struct App {
     reviewed_files: HashSet<String>,
 
     editor_target: Option<CommentTarget>,
-    editor_buffer: crate::ui::NoteBuffer,
-    prompt_buffer: crate::ui::NoteBuffer,
-    prompt_scroll: u16,
-    prompt_viewport_height: u16,
+    editor_buffer: TextArea<'static>,
+    prompt_buffer: TextArea<'static>,
 
     status: String,
     show_help: bool,
     show_prompt: bool,
+    comment_list: Vec<CommentListEntry>,
+    comment_list_selected: usize,
+    comment_list_marked: HashSet<usize>,
 
     highlighter: Highlighter,
 }
@@ -214,6 +304,8 @@ impl App {
         notes_ref: String,
         base_ref: Option<String>,
         show_ignored: bool,
+        view: ViewKind,
+        jump_target: Option<JumpTarget>,
     ) -> Result<Self> {
         let highlighter = Highlighter::new()?;
         let diff_view_mode = match crate::git::read_local_config_value(&repo, CONFIG_DIFF_VIEW_KEY)
@@ -237,7 +329,8 @@ impl App {
             notes_ref,
             base_ref,
             show_ignored,
-            view: ViewKind::All,
+            jump_target,
+            view,
             focus: Focus::Files,
             mode: Mode::Browse,
             diff_view_mode,
@@ -260,17 +353,48 @@ impl App {
             diff_total_visual_lines: 0,
             reviewed_files: HashSet::new(),
             editor_target: None,
-            editor_buffer: crate::ui::NoteBuffer::new(),
-            prompt_buffer: crate::ui::NoteBuffer::new(),
-            prompt_scroll: 0,
-            prompt_viewport_height: 1,
+            editor_buffer: crate::ui::empty_textarea(),
+            prompt_buffer: crate::ui::empty_textarea(),
             status: String::new(),
             show_help: false,
             show_prompt: false,
+            comment_list: Vec::new(),
+            comment_list_selected: 0,
+            comment_list_marked: HashSet::new(),
             highlighter,
         };
         app.reload_view()?;
+        app.apply_jump_target()?;
         Ok(app)
+    }
+
+    fn apply_jump_target(&mut self) -> Result<()> {
+        let Some(target) = self.jump_target.take() else {
+            return Ok(());
+        };
+
+        let Some(idx) = self.files.iter().position(|e| e.path == target.path) else {
+            self.status = format!("File not found in view: {}", target.path);
+            return Ok(());
+        };
+
+        self.file_selected = idx;
+        self.reload_diff_for_selected()?;
+
+        if let Some(line_key) = target.line {
+            let keep = match line_key.side {
+                LineSide::Old => KeepLine::Old(line_key.line),
+                LineSide::New => KeepLine::New(line_key.line),
+            };
+            if let Some(row) = self.find_row_for_keep_line(keep) {
+                self.diff_cursor = row;
+            } else {
+                self.status = format!("Line {} not found in diff", line_key.line);
+            }
+            self.focus = Focus::Diff;
+        }
+
+        Ok(())
     }
 
     fn run_loop(&mut self, ui: &mut crate::ui::Ui) -> Result<()> {
@@ -278,25 +402,25 @@ impl App {
 
         loop {
             let size = ui.terminal.size().context("read terminal size")?;
-            let outer = ratatui::layout::Rect::from(size);
-            let [main, _footer] = ratatui::layout::Layout::default()
+            let outer = ratatui::layout::Rect {
+                x: 0,
+                y: 0,
+                width: size.width,
+                height: size.height,
+            };
+            let layout = ratatui::layout::Layout::default()
                 .direction(ratatui::layout::Direction::Vertical)
                 .constraints([
                     ratatui::layout::Constraint::Min(1),
                     ratatui::layout::Constraint::Length(1),
                 ])
-                .areas(outer);
+                .split(outer);
+            let main = layout[0];
 
             let rects = crate::ui::layout(main);
             self.files_viewport_height = rects.files.height.saturating_sub(2).max(1);
             self.diff_viewport_height = rects.diff.height.saturating_sub(2).max(1);
             self.diff_viewport_width = rects.diff.width.saturating_sub(2).max(1);
-            if self.show_prompt {
-                let popup = crate::ui::prompt_popup_rect(outer);
-                self.prompt_viewport_height = popup.height.saturating_sub(2).max(1);
-            } else {
-                self.prompt_viewport_height = 1;
-            }
             self.recompute_diff_metrics(self.diff_viewport_width);
             if !self.manual_scroll {
                 self.ensure_file_visible(self.files_viewport_height);
@@ -304,9 +428,6 @@ impl App {
             }
             self.clamp_file_scroll();
             self.clamp_diff_scroll();
-            if self.mode == Mode::EditPrompt {
-                self.ensure_prompt_visible();
-            }
 
             ui.terminal
                 .draw(|f| {
@@ -337,10 +458,12 @@ impl App {
                             editor_target: self.editor_target.as_ref(),
                             editor_buffer: &self.editor_buffer,
                             prompt_buffer: &self.prompt_buffer,
-                            prompt_scroll: self.prompt_scroll,
                             status: &self.status,
                             show_help: self.show_help,
                             show_prompt: self.show_prompt,
+                            comment_list: &self.comment_list,
+                            comment_list_selected: self.comment_list_selected,
+                            comment_list_marked: &self.comment_list_marked,
                         },
                     )
                 })
@@ -372,6 +495,7 @@ impl App {
             Mode::Browse => self.handle_browse_key(key),
             Mode::EditComment => self.handle_edit_key(key),
             Mode::EditPrompt => self.handle_prompt_key(key),
+            Mode::CommentList => self.handle_comment_list_key(key),
         }
     }
 
@@ -424,6 +548,12 @@ impl App {
             return Ok(true);
         }
 
+        let is_shift_c = matches!(key.code, KeyCode::Char('C'))
+            || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::SHIFT));
+        if is_shift_c && no_ctrl_alt {
+            return self.open_comment_list();
+        }
+
         if key.code == KeyCode::Char('p') && key.modifiers.is_empty() {
             if self.show_prompt {
                 self.show_prompt = false;
@@ -431,8 +561,7 @@ impl App {
             } else {
                 self.show_prompt = true;
                 self.prompt_buffer =
-                    crate::ui::NoteBuffer::from_string(crate::review::render_prompt(&self.review));
-                self.prompt_scroll = 0;
+                    crate::ui::textarea_from_string(&crate::review::render_prompt(&self.review));
                 self.mode = Mode::EditPrompt;
             }
             return Ok(false);
@@ -551,7 +680,7 @@ impl App {
         if key.code == KeyCode::Esc {
             self.mode = Mode::Browse;
             self.editor_target = None;
-            self.editor_buffer = crate::ui::NoteBuffer::new();
+            self.editor_buffer = crate::ui::empty_textarea();
             self.status = "Canceled".to_string();
             return Ok(false);
         }
@@ -564,30 +693,12 @@ impl App {
             return Ok(false);
         }
 
-        match key.code {
-            KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                self.accept_comment_and_move_on()?;
-            }
-            KeyCode::Up => self.editor_buffer.move_up(),
-            KeyCode::Down => self.editor_buffer.move_down(),
-            KeyCode::Left => self.editor_buffer.move_left(),
-            KeyCode::Right => self.editor_buffer.move_right(),
-            KeyCode::Home => self.editor_buffer.move_line_start(),
-            KeyCode::End => self.editor_buffer.move_line_end(),
-            KeyCode::Backspace => {
-                self.editor_buffer.backspace();
-            }
-            KeyCode::Enter => self.editor_buffer.insert_newline(),
-            KeyCode::Char(c) => {
-                if !key.modifiers.contains(KeyModifiers::CONTROL)
-                    && !key.modifiers.contains(KeyModifiers::ALT)
-                {
-                    self.editor_buffer.insert_char(c);
-                }
-            }
-            _ => {}
+        if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT) {
+            self.accept_comment_and_move_on()?;
+            return Ok(false);
         }
 
+        self.editor_buffer.input(key);
         Ok(false)
     }
 
@@ -603,7 +714,7 @@ impl App {
             && key.modifiers.contains(KeyModifiers::CONTROL)
             && !key.modifiers.contains(KeyModifiers::ALT)
         {
-            let prompt = self.prompt_buffer.as_string();
+            let prompt = crate::ui::textarea_contents(&self.prompt_buffer);
             match crate::clipboard::copy(&prompt) {
                 Ok(method) => self.status = format!("Copied prompt to clipboard ({method})"),
                 Err(e) => self.status = format!("Clipboard failed: {e}"),
@@ -614,7 +725,7 @@ impl App {
         }
 
         if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT) {
-            let prompt = self.prompt_buffer.as_string();
+            let prompt = crate::ui::textarea_contents(&self.prompt_buffer);
             match crate::clipboard::copy(&prompt) {
                 Ok(method) => self.status = format!("Copied prompt to clipboard ({method})"),
                 Err(e) => self.status = format!("Clipboard failed: {e}"),
@@ -624,28 +735,233 @@ impl App {
             return Ok(false);
         }
 
+        self.prompt_buffer.input(key);
+        Ok(false)
+    }
+
+    fn handle_comment_list_key(&mut self, key: KeyEvent) -> Result<bool> {
+        if key.code == KeyCode::Esc {
+            self.close_comment_list();
+            return Ok(false);
+        }
+
+        if self.comment_list.is_empty() {
+            return Ok(false);
+        }
+
+        let no_ctrl_alt = !key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::ALT);
+
+        if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT) {
+            self.jump_to_comment_list_entry()?;
+            return Ok(false);
+        }
+
+        let is_shift_r = matches!(key.code, KeyCode::Char('R'))
+            || (key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::SHIFT));
+        if is_shift_r && no_ctrl_alt {
+            self.resolve_comment_list_selection()?;
+            return Ok(false);
+        }
+
+        if key.code == KeyCode::Delete && no_ctrl_alt {
+            self.discard_comment_list_selection()?;
+            return Ok(false);
+        }
+
         match key.code {
-            KeyCode::Up => self.prompt_buffer.move_up(),
-            KeyCode::Down => self.prompt_buffer.move_down(),
-            KeyCode::Left => self.prompt_buffer.move_left(),
-            KeyCode::Right => self.prompt_buffer.move_right(),
-            KeyCode::Home => self.prompt_buffer.move_line_start(),
-            KeyCode::End => self.prompt_buffer.move_line_end(),
-            KeyCode::Backspace => {
-                self.prompt_buffer.backspace();
-            }
-            KeyCode::Enter => self.prompt_buffer.insert_newline(),
-            KeyCode::Char(c) => {
-                if !key.modifiers.contains(KeyModifiers::CONTROL)
-                    && !key.modifiers.contains(KeyModifiers::ALT)
-                {
-                    self.prompt_buffer.insert_char(c);
-                }
+            KeyCode::Up | KeyCode::Char('k') => self.move_comment_list_selection(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_comment_list_selection(1),
+            KeyCode::PageUp => self.move_comment_list_selection(-10),
+            KeyCode::PageDown => self.move_comment_list_selection(10),
+            KeyCode::Home => self.comment_list_selected = 0,
+            KeyCode::End => self.comment_list_selected = self.comment_list.len().saturating_sub(1),
+            KeyCode::Enter if no_ctrl_alt => {
+                self.toggle_comment_list_mark();
             }
             _ => {}
         }
 
         Ok(false)
+    }
+
+    fn open_comment_list(&mut self) -> Result<bool> {
+        self.comment_list = self.build_comment_list();
+        if self.comment_list.is_empty() {
+            self.status = "No comments".to_string();
+            return Ok(false);
+        }
+        self.comment_list_selected = 0;
+        self.comment_list_marked.clear();
+        self.show_help = false;
+        self.show_prompt = false;
+        self.mode = Mode::CommentList;
+        Ok(false)
+    }
+
+    fn close_comment_list(&mut self) {
+        self.mode = Mode::Browse;
+        self.comment_list_marked.clear();
+    }
+
+    fn move_comment_list_selection(&mut self, delta: i32) {
+        if self.comment_list.is_empty() {
+            self.comment_list_selected = 0;
+            return;
+        }
+        let max = (self.comment_list.len() - 1) as i32;
+        let cur = self.comment_list_selected as i32;
+        self.comment_list_selected = (cur + delta).clamp(0, max) as usize;
+    }
+
+    fn toggle_comment_list_mark(&mut self) {
+        if self.comment_list.is_empty() {
+            return;
+        }
+        let idx = self.comment_list_selected;
+        if !self.comment_list_marked.insert(idx) {
+            self.comment_list_marked.remove(&idx);
+        }
+    }
+
+    fn comment_list_selected_paths(&self) -> Vec<String> {
+        if self.comment_list.is_empty() {
+            return Vec::new();
+        }
+        let indices: Vec<usize> = if self.comment_list_marked.is_empty() {
+            vec![self.comment_list_selected]
+        } else {
+            self.comment_list_marked.iter().copied().collect()
+        };
+        let mut paths = std::collections::BTreeSet::new();
+        for idx in indices {
+            if let Some(entry) = self.comment_list.get(idx) {
+                paths.insert(entry.path.clone());
+            }
+        }
+        paths.into_iter().collect()
+    }
+
+    fn resolve_comment_list_selection(&mut self) -> Result<()> {
+        let paths = self.comment_list_selected_paths();
+        if paths.is_empty() {
+            return Ok(());
+        }
+        for path in &paths {
+            if let Some(file) = self.review.files.get_mut(path) {
+                if let Some(c) = file.file_comment.as_mut() {
+                    c.resolved = true;
+                }
+                for c in file.comments.values_mut() {
+                    c.resolved = true;
+                }
+                if file.file_comment.is_none() && file.comments.is_empty() && !file.reviewed {
+                    self.review.files.remove(path);
+                }
+            }
+            self.persist_file_note(path)?;
+        }
+
+        self.comment_list = self.build_comment_list();
+        self.comment_list_selected = self
+            .comment_list_selected
+            .min(self.comment_list.len().saturating_sub(1));
+        self.comment_list_marked.clear();
+        self.status = format!("Resolved comments ({})", paths.len());
+        Ok(())
+    }
+
+    fn discard_comment_list_selection(&mut self) -> Result<()> {
+        let paths = self.comment_list_selected_paths();
+        if paths.is_empty() {
+            return Ok(());
+        }
+        for path in &paths {
+            if let Some(file) = self.review.files.get_mut(path) {
+                file.file_comment = None;
+                file.comments.clear();
+                if !file.reviewed {
+                    self.review.files.remove(path);
+                }
+            }
+            self.persist_file_note(path)?;
+        }
+
+        self.comment_list = self.build_comment_list();
+        self.comment_list_selected = self
+            .comment_list_selected
+            .min(self.comment_list.len().saturating_sub(1));
+        self.comment_list_marked.clear();
+        self.status = format!("Discarded comments ({})", paths.len());
+        Ok(())
+    }
+
+    fn jump_to_comment_list_entry(&mut self) -> Result<()> {
+        if self.comment_list.is_empty() {
+            return Ok(());
+        }
+        let entry = self.comment_list[self.comment_list_selected].clone();
+        let Some(idx) = self.files.iter().position(|e| e.path == entry.path) else {
+            self.status = format!("File not found: {}", entry.path);
+            return Ok(());
+        };
+        self.file_selected = idx;
+        self.reload_diff_for_selected()?;
+        match entry.locator {
+            CommentLocator::File => {
+                self.diff_cursor = 0;
+                self.focus = Focus::Diff;
+                self.close_comment_list();
+                return Ok(());
+            }
+            CommentLocator::Line { side, line } => {
+                let keep = match side {
+                    LineSide::Old => KeepLine::Old(line),
+                    LineSide::New => KeepLine::New(line),
+                };
+                if let Some(idx) = self.find_row_for_keep_line(keep) {
+                    self.diff_cursor = idx;
+                    self.focus = Focus::Diff;
+                    self.close_comment_list();
+                } else {
+                    self.status = format!("Line {line} not found in diff");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn build_comment_list(&self) -> Vec<CommentListEntry> {
+        let mut out = Vec::new();
+        for (path, file) in &self.review.files {
+            if let Some(c) = file
+                .file_comment
+                .as_ref()
+                .filter(|c| !c.body.trim().is_empty())
+            {
+                out.push(CommentListEntry {
+                    path: path.clone(),
+                    locator: CommentLocator::File,
+                    body: c.body.clone(),
+                    resolved: c.resolved,
+                });
+            }
+            for (k, c) in &file.comments {
+                if c.body.trim().is_empty() {
+                    continue;
+                }
+                out.push(CommentListEntry {
+                    path: path.clone(),
+                    locator: CommentLocator::Line {
+                        side: k.side,
+                        line: k.line,
+                    },
+                    body: c.body.clone(),
+                    resolved: c.resolved,
+                });
+            }
+        }
+        out
     }
 
     fn handle_mouse(&mut self, m: MouseEvent, rects: crate::ui::LayoutRects) -> Result<()> {
@@ -742,8 +1058,7 @@ impl App {
         self.manual_scroll = false;
         self.show_help = false;
         self.show_prompt = false;
-        self.prompt_buffer = crate::ui::NoteBuffer::new();
-        self.prompt_scroll = 0;
+        self.prompt_buffer = crate::ui::empty_textarea();
         self.reviewed_files.clear();
         self.status.clear();
         self.file_selected = 0;
@@ -751,7 +1066,7 @@ impl App {
         self.diff_cursor = 0;
         self.diff_scroll = 0;
         self.editor_target = None;
-        self.editor_buffer = crate::ui::NoteBuffer::new();
+        self.editor_buffer = crate::ui::empty_textarea();
 
         if self.view == ViewKind::Base {
             let base = self
@@ -847,6 +1162,16 @@ impl App {
             .map(|(path, _)| path.clone())
             .collect();
 
+        self.apply_reviewed_invalidation()?;
+
+        self.reviewed_files = self
+            .review
+            .files
+            .iter()
+            .filter(|(_, f)| f.reviewed)
+            .map(|(path, _)| path.clone())
+            .collect();
+
         self.reload_diff_for_selected()?;
         Ok(())
     }
@@ -855,7 +1180,6 @@ impl App {
         let keep_path = self.files.get(self.file_selected).map(|e| e.path.clone());
         let keep_line = self.keep_cursor_line();
         self.manual_scroll = false;
-        self.prompt_scroll = 0;
         self.reviewed_files.clear();
 
         self.head_commit_oid = crate::git::head_commit_oid(&self.repo).ok();
@@ -953,6 +1277,16 @@ impl App {
             .map(|(path, _)| path.clone())
             .collect();
 
+        self.apply_reviewed_invalidation()?;
+
+        self.reviewed_files = self
+            .review
+            .files
+            .iter()
+            .filter(|(_, f)| f.reviewed)
+            .map(|(path, _)| path.clone())
+            .collect();
+
         self.reload_diff_for_selected()?;
         if let Some(k) = keep_line
             && let Some(idx) = self.find_row_for_keep_line(k)
@@ -960,6 +1294,73 @@ impl App {
             self.diff_cursor = idx;
         }
         self.status = "Reloaded".to_string();
+        Ok(())
+    }
+
+    fn apply_reviewed_invalidation(&mut self) -> Result<()> {
+        if self.review.files.is_empty() {
+            return Ok(());
+        }
+
+        let review_checks = {
+            let base_tree = if self.view == ViewKind::Base {
+                self.base_ref
+                    .as_deref()
+                    .map(|b| crate::git::merge_base_tree(&self.repo, b))
+                    .transpose()?
+            } else {
+                None
+            };
+
+            let mut checks = Vec::new();
+            for (path, file) in self.review.files.iter() {
+                if !file.reviewed {
+                    continue;
+                }
+                let current =
+                    self.review_hash_for_current_view_with_base(base_tree.as_ref(), path)?;
+                let all_hash = if self.view == ViewKind::Base {
+                    self.review_hash_for_view(ViewKind::All, None, path)?
+                } else {
+                    None
+                };
+                checks.push((path.clone(), file.reviewed_hash.clone(), current, all_hash));
+            }
+            checks
+        };
+
+        let mut changed = Vec::new();
+        for (path, stored, current, all_hash) in review_checks {
+            let Some(file) = self.review.files.get_mut(&path) else {
+                continue;
+            };
+            match stored.as_deref() {
+                None => {
+                    if let Some(hash) = current {
+                        file.reviewed_hash = Some(hash);
+                        changed.push(path.clone());
+                    }
+                }
+                Some(prev) => {
+                    let mut valid = current.as_deref() == Some(prev);
+                    if !valid {
+                        valid = all_hash.as_deref() == Some(prev);
+                    }
+                    if !valid {
+                        file.reviewed = false;
+                        file.reviewed_hash = None;
+                        changed.push(path.clone());
+                    }
+                }
+            }
+        }
+
+        if !changed.is_empty() && self.head_commit_oid.is_some() {
+            for path in changed {
+                self.persist_file_note(&path)?;
+            }
+        }
+
         Ok(())
     }
 
@@ -1341,8 +1742,28 @@ impl App {
             self.status = "No file selected".to_string();
             return;
         };
+        let was_reviewed = self
+            .review
+            .files
+            .get(&path)
+            .map(|f| f.reviewed)
+            .unwrap_or(false);
+        let new_reviewed = !was_reviewed;
+        let hash = if new_reviewed {
+            match self.review_hash_for_current_view(&path) {
+                Ok(v) => v,
+                Err(e) => {
+                    self.status = format!("Failed to hash reviewed file: {e}");
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+
         let entry = self.review.files.entry(path.clone()).or_default();
-        entry.reviewed = !entry.reviewed;
+        entry.reviewed = new_reviewed;
+        entry.reviewed_hash = hash;
         if entry.reviewed {
             self.reviewed_files.insert(path.clone());
             self.status = "Marked reviewed".to_string();
@@ -1355,19 +1776,6 @@ impl App {
         }
         if let Err(e) = self.persist_file_note(&path) {
             self.status = format!("Failed to save reviewed state: {e}");
-        }
-    }
-
-    fn ensure_prompt_visible(&mut self) {
-        let viewport = self.prompt_viewport_height.max(1) as usize;
-        let cur = self.prompt_buffer.cursor_row;
-        let scroll = self.prompt_scroll as usize;
-        if cur < scroll {
-            self.prompt_scroll = cur as u16;
-            return;
-        }
-        if cur >= scroll + viewport {
-            self.prompt_scroll = (cur + 1 - viewport) as u16;
         }
     }
 
@@ -1549,7 +1957,7 @@ impl App {
                 .unwrap_or(""),
         };
         self.editor_target = Some(target);
-        self.editor_buffer = crate::ui::NoteBuffer::from_string(existing.to_string());
+        self.editor_buffer = crate::ui::textarea_from_string(existing);
         self.show_help = false;
         self.show_prompt = false;
         self.mode = Mode::EditComment;
@@ -1562,7 +1970,7 @@ impl App {
             return Ok(());
         };
 
-        let comment = self.editor_buffer.as_string();
+        let comment = crate::ui::textarea_contents(&self.editor_buffer);
         if comment.trim().is_empty() {
             let removed = match target.locator {
                 CommentLocator::File => self.review.remove_file_comment(&target.path),
@@ -1588,7 +1996,7 @@ impl App {
 
         self.mode = Mode::Browse;
         self.editor_target = None;
-        self.editor_buffer = crate::ui::NoteBuffer::new();
+        self.editor_buffer = crate::ui::empty_textarea();
 
         for i in (self.diff_cursor + 1)..self.diff_rows.len() {
             let commentable = match &self.diff_rows[i] {
@@ -1678,6 +2086,9 @@ impl App {
 fn merge_file_review(target: &mut FileReview, incoming: FileReview) {
     if incoming.reviewed {
         target.reviewed = true;
+        if target.reviewed_hash.is_none() {
+            target.reviewed_hash = incoming.reviewed_hash;
+        }
     }
     match (&target.file_comment, &incoming.file_comment) {
         (None, Some(_)) => target.file_comment = incoming.file_comment,
@@ -1713,6 +2124,24 @@ fn parse_diff_context(raw: &str) -> Option<u32> {
     Some(parsed.clamp(MIN_DIFF_CONTEXT, MAX_DIFF_CONTEXT))
 }
 
+fn parse_view_kind(raw: &str) -> Result<ViewKind> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "all" => Ok(ViewKind::All),
+        "unstaged" => Ok(ViewKind::Unstaged),
+        "staged" => Ok(ViewKind::Staged),
+        "base" => Ok(ViewKind::Base),
+        _ => anyhow::bail!("--view must be one of: all, unstaged, staged, base"),
+    }
+}
+
+fn parse_line_side(raw: &str) -> Result<LineSide> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "old" => Ok(LineSide::Old),
+        "new" => Ok(LineSide::New),
+        _ => anyhow::bail!("--side must be 'old' or 'new'"),
+    }
+}
+
 fn diff_view_mode_value(mode: DiffViewMode) -> &'static str {
     match mode {
         DiffViewMode::Unified => "unified",
@@ -1726,7 +2155,16 @@ impl App {
         base_tree: Option<&gix::Tree<'_>>,
         path: &str,
     ) -> Result<(Option<String>, Option<String>)> {
-        let out = match self.view {
+        self.read_before_after_for_view(self.view, base_tree, path)
+    }
+
+    fn read_before_after_for_view(
+        &self,
+        view: ViewKind,
+        base_tree: Option<&gix::Tree<'_>>,
+        path: &str,
+    ) -> Result<(Option<String>, Option<String>)> {
+        let out = match view {
             ViewKind::All => (
                 crate::git::try_read_head(&self.repo, path)?,
                 crate::git::try_read_worktree(&self.repo, path)?,
@@ -1748,6 +2186,45 @@ impl App {
             ),
         };
         Ok(out)
+    }
+
+    fn review_hash_for_view(
+        &self,
+        view: ViewKind,
+        base_tree: Option<&gix::Tree<'_>>,
+        path: &str,
+    ) -> Result<Option<String>> {
+        let (before, after) = self.read_before_after_for_view(view, base_tree, path)?;
+        if before.is_none() && after.is_none() {
+            return Ok(None);
+        }
+        let hash = review_fingerprint(before.as_deref(), after.as_deref())?;
+        Ok(Some(hash))
+    }
+
+    fn review_hash_for_current_view(&self, path: &str) -> Result<Option<String>> {
+        let base_tree = if self.view == ViewKind::Base {
+            self.base_ref
+                .as_deref()
+                .map(|b| crate::git::merge_base_tree(&self.repo, b))
+                .transpose()?
+        } else {
+            None
+        };
+        self.review_hash_for_current_view_with_base(base_tree.as_ref(), path)
+    }
+
+    fn review_hash_for_current_view_with_base(
+        &self,
+        base_tree: Option<&gix::Tree<'_>>,
+        path: &str,
+    ) -> Result<Option<String>> {
+        let view = if self.view == ViewKind::Base {
+            ViewKind::Base
+        } else {
+            ViewKind::All
+        };
+        self.review_hash_for_view(view, base_tree, path)
     }
 
     fn toggle_diff_view_mode(&mut self) -> Result<()> {
@@ -2121,4 +2598,30 @@ fn word_wrap_line_count(s: &str, width: u16) -> usize {
     }
 
     lines
+}
+
+fn review_fingerprint(before: Option<&str>, after: Option<&str>) -> Result<String> {
+    let mut h = hasher(Kind::Sha1);
+    h.update(b"remark-review-v1\0");
+    hash_part(&mut h, b"before", before);
+    hash_part(&mut h, b"after", after);
+    let oid = h.try_finalize().context("finalize review hash")?;
+    Ok(oid.to_string())
+}
+
+fn hash_part(h: &mut gix_hash::Hasher, label: &[u8], value: Option<&str>) {
+    h.update(label);
+    h.update(b"\0");
+    match value {
+        Some(v) => {
+            h.update(b"1\0");
+            let len = v.len().to_string();
+            h.update(len.as_bytes());
+            h.update(b"\0");
+            h.update(v.as_bytes());
+        }
+        None => {
+            h.update(b"0\0");
+        }
+    }
 }
