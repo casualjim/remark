@@ -1,0 +1,2 @@
+- name: Install Rust toolchain
+  uses: dtolnay/rust-toolchain@stable
