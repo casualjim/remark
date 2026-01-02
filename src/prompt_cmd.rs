@@ -157,7 +157,12 @@ fn prompt_view_order(filter: Filter, include_base: bool) -> Vec<ViewKind> {
         Filter::All => vec![ViewKind::All, ViewKind::Staged, ViewKind::Unstaged],
         Filter::Staged => vec![ViewKind::Staged, ViewKind::All, ViewKind::Unstaged],
         Filter::Unstaged => vec![ViewKind::Unstaged, ViewKind::All, ViewKind::Staged],
-        Filter::Base => vec![ViewKind::Base, ViewKind::All, ViewKind::Staged, ViewKind::Unstaged],
+        Filter::Base => vec![
+            ViewKind::Base,
+            ViewKind::All,
+            ViewKind::Staged,
+            ViewKind::Unstaged,
+        ],
     };
     if include_base && !order.contains(&ViewKind::Base) {
         order.push(ViewKind::Base);

@@ -58,9 +58,7 @@ impl<'a> LineCodeResolver<'a> {
     fn map_for_view_path(&mut self, view: ViewKind, path: &str) -> Option<&LineCodeMap> {
         let cache_key = (view, path.to_string());
         if !self.cache.contains_key(&cache_key) {
-            let map = self
-                .build_map_for_view_path(view, path)
-                .unwrap_or_default();
+            let map = self.build_map_for_view_path(view, path).unwrap_or_default();
             self.cache.insert(cache_key.clone(), map);
         }
         self.cache.get(&cache_key)
