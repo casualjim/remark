@@ -1,8 +1,15 @@
+## [0.1.12] - 2026-01-02
+
+### 🐛 Bug Fixes
+
+- Make windows dist builds succeed
 ## [0.1.11] - 2026-01-02
 
 ### ⚙️ Miscellaneous Tasks
 
 - Update cargo-dist release workflow
+- Update changelog for v0.1.11 [ci skip]
+- Release remark version 0.1.11
 ## [0.1.10] - 2026-01-02
 
 ### ⚙️ Miscellaneous Tasks
