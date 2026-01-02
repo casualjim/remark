@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 
 use crate::git::ViewKind;
+use crate::prompt_code::LineCodeResolver;
 use crate::review::{FileReview, Review};
 
 pub fn run() -> Result<()> {
@@ -102,7 +103,14 @@ pub fn run() -> Result<()> {
         }
     }
 
-    let prompt = crate::review::render_prompt(&review);
+    let diff_context = prompt_diff_context(&repo);
+    let view_order = prompt_view_order(filter, base_ref.is_some());
+    let base_tree = base_ref
+        .as_deref()
+        .and_then(|b| crate::git::merge_base_tree(&repo, b).ok());
+    let mut resolver = LineCodeResolver::new(&repo, base_tree, diff_context, view_order);
+
+    let prompt = crate::review::render_prompt(&review, |path, key| resolver.line_code(path, key));
     print!("{prompt}");
     if !prompt.ends_with('\n') {
         println!();
@@ -117,6 +125,10 @@ enum Filter {
     Unstaged,
     Base,
 }
+
+const DEFAULT_DIFF_CONTEXT: u32 = 3;
+const MIN_DIFF_CONTEXT: u32 = 0;
+const MAX_DIFF_CONTEXT: u32 = 20;
 
 fn merge_file_review(target: &mut FileReview, incoming: FileReview) {
     match (&target.file_comment, &incoming.file_comment) {
@@ -138,6 +150,31 @@ fn merge_file_review(target: &mut FileReview, incoming: FileReview) {
             _ => {}
         }
     }
+}
+
+fn prompt_view_order(filter: Filter, include_base: bool) -> Vec<ViewKind> {
+    let mut order = match filter {
+        Filter::All => vec![ViewKind::All, ViewKind::Staged, ViewKind::Unstaged],
+        Filter::Staged => vec![ViewKind::Staged, ViewKind::All, ViewKind::Unstaged],
+        Filter::Unstaged => vec![ViewKind::Unstaged, ViewKind::All, ViewKind::Staged],
+        Filter::Base => vec![ViewKind::Base, ViewKind::All, ViewKind::Staged, ViewKind::Unstaged],
+    };
+    if include_base && !order.contains(&ViewKind::Base) {
+        order.push(ViewKind::Base);
+    }
+    if !include_base {
+        order.retain(|v| *v != ViewKind::Base);
+    }
+    order
+}
+
+fn prompt_diff_context(repo: &gix::Repository) -> u32 {
+    let raw = crate::git::read_local_config_value(repo, "remark.diffContext")
+        .ok()
+        .flatten();
+    raw.and_then(|v| v.trim().parse::<u32>().ok())
+        .map(|v| v.clamp(MIN_DIFF_CONTEXT, MAX_DIFF_CONTEXT))
+        .unwrap_or(DEFAULT_DIFF_CONTEXT)
 }
 
 fn print_help_and_exit() -> ! {

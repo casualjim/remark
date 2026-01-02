@@ -8,7 +8,7 @@ use gix_dir::walk::EmissionMode;
 pub const DEFAULT_NOTES_REF: &str = "refs/notes/remark";
 pub const CONFIG_NOTES_REF_KEY: &str = "remark.notesRef";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ViewKind {
     All,
     Unstaged,

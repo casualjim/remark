@@ -332,7 +332,10 @@ pub fn decode_file_note(note: &str) -> Option<FileReview> {
     None
 }
 
-pub fn render_prompt(review: &Review) -> String {
+pub fn render_prompt<F>(review: &Review, mut line_code: F) -> String
+where
+    F: FnMut(&str, LineKey) -> Option<String>,
+{
     let mut out = String::new();
     if review.files.is_empty() {
         out.push_str("No comments.\n");
@@ -377,11 +380,10 @@ These notes are grouped by file. Every comment belongs to the file section it ap
         if !line_comments.is_empty() {
             out.push_str("### Line comments\n");
             for (line, comment) in line_comments {
-                let side = match line.side {
-                    LineSide::Old => "old",
-                    LineSide::New => "new",
-                };
-                out.push_str(&format!("- {side}:{}\n", line.line));
+                out.push_str(&format!("- line {}\n", line.line));
+                if let Some(code) = line_code(path, *line) {
+                    push_fenced_block_with_lang(&mut out, &code, "diff");
+                }
                 push_fenced_block(&mut out, comment);
             }
         }
@@ -396,11 +398,15 @@ These notes are grouped by file. Every comment belongs to the file section it ap
 }
 
 fn push_fenced_block(out: &mut String, text: &str) {
+    push_fenced_block_with_lang(out, text, "text");
+}
+
+fn push_fenced_block_with_lang(out: &mut String, text: &str, lang: &str) {
     let mut ticks = 3usize;
     loop {
         let fence = "`".repeat(ticks);
         if !text.contains(&fence) {
-            out.push_str(&format!("{fence}text\n"));
+            out.push_str(&format!("{fence}{lang}\n"));
             out.push_str(text);
             if !text.ends_with('\n') {
                 out.push('\n');
@@ -563,11 +569,11 @@ mod tests {
         r.set_file_comment("b.rs", "All done".to_string());
         r.toggle_file_comment_resolved("b.rs");
 
-        let p = render_prompt(&r);
+        let p = render_prompt(&r, |_, _| None);
         assert!(!p.contains("Target:"));
         assert!(!p.contains("Base:"));
         assert!(p.contains("## a.rs"));
-        assert!(p.contains("- new:10"));
+        assert!(p.contains("- line 10"));
         assert!(p.contains("Fix this"));
         assert!(!p.contains("File todo"));
         assert!(!p.contains("Restore this"));
@@ -596,7 +602,7 @@ mod tests {
         let mut r = Review::new();
         r.set_file_comment("a.rs", "done".to_string());
         r.toggle_file_comment_resolved("a.rs");
-        let p = render_prompt(&r);
+        let p = render_prompt(&r, |_, _| None);
         assert!(p.contains("No comments."));
     }
 
@@ -604,10 +610,28 @@ mod tests {
     fn prompt_does_not_duplicate_file_comments_as_todos() {
         let mut r = Review::new();
         r.set_file_comment("a.rs", "Do thing".to_string());
-        let p = render_prompt(&r);
+        let p = render_prompt(&r, |_, _| None);
         assert!(p.contains("## a.rs"));
         assert!(p.contains("### File comment"));
         assert!(p.contains("Do thing"));
         assert!(!p.contains("## TODOs"));
+    }
+
+    #[test]
+    fn prompt_includes_line_code_when_available() {
+        let mut r = Review::new();
+        r.set_line_comment("a.rs", LineSide::New, 10, "Fix this".to_string());
+
+        let p = render_prompt(&r, |path, key| {
+            if path == "a.rs" && key.side == LineSide::New && key.line == 10 {
+                Some("+let x = 1;".to_string())
+            } else {
+                None
+            }
+        });
+
+        assert!(p.contains("```diff"));
+        assert!(p.contains("+let x = 1;"));
+        assert!(p.contains("Fix this"));
     }
 }

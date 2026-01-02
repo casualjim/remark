@@ -12,6 +12,7 @@ use tui_textarea::TextArea;
 use crate::file_tree::FileTreeView;
 use crate::git::ViewKind;
 use crate::highlight::Highlighter;
+use crate::prompt_code::LineCodeResolver;
 use crate::review::{FileReview, LineKey, LineSide, Review};
 use unicode_width::UnicodeWidthStr;
 
@@ -561,7 +562,7 @@ impl App {
             } else {
                 self.show_prompt = true;
                 self.prompt_buffer =
-                    crate::ui::textarea_from_string(&crate::review::render_prompt(&self.review));
+                    crate::ui::textarea_from_string(&self.render_prompt_with_code());
                 self.mode = Mode::EditPrompt;
             }
             return Ok(false);
@@ -2186,6 +2187,32 @@ impl App {
             ),
         };
         Ok(out)
+    }
+
+    fn render_prompt_with_code(&self) -> String {
+        let base_tree = self
+            .base_ref
+            .as_deref()
+            .and_then(|b| crate::git::merge_base_tree(&self.repo, b).ok());
+
+        let mut view_order = vec![self.view];
+        for view in [
+            ViewKind::All,
+            ViewKind::Staged,
+            ViewKind::Unstaged,
+            ViewKind::Base,
+        ] {
+            if view == ViewKind::Base && self.base_ref.is_none() {
+                continue;
+            }
+            if !view_order.contains(&view) {
+                view_order.push(view);
+            }
+        }
+
+        let mut resolver =
+            LineCodeResolver::new(&self.repo, base_tree, self.diff_context, view_order);
+        crate::review::render_prompt(&self.review, |path, key| resolver.line_code(path, key))
     }
 
     fn review_hash_for_view(

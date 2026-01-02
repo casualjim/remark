@@ -6,6 +6,7 @@ mod git;
 mod highlight;
 mod new_cmd;
 mod notes;
+mod prompt_code;
 mod prompt_cmd;
 mod purge_cmd;
 mod resolve_cmd;
