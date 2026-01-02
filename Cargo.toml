@@ -49,7 +49,7 @@ sign-commit = false
 sign-tag = false
 publish = false
 allow-branch = ["main"]
-pre-release-commit-message = "chore: Release {{crate_name}} version {{version}} [ci skip]"
+pre-release-commit-message = "chore: Release {{crate_name}} version {{version}}"
 
 [package.metadata.wix]
 upgrade-guid = "57638460-6758-438B-A317-03146D8FE5F7"

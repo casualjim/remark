@@ -26,7 +26,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
-          token: ${{ secrets.RELEASE_TOKEN || github.token }}
+          token: ${{ github.token }}
       - name: Configure git identity
         run: |
           git config user.name "${{ github.actor }}"
@@ -66,4 +66,14 @@ jobs:
           fi
           git commit -m "chore: update changelog for v${{ steps.version.outputs.next_version }} [ci skip]"
       - name: Run cargo-release
-        run: cargo release ${{ steps.version.outputs.next_version }} --no-confirm --no-publish --push --execute
+        run: cargo release ${{ steps.version.outputs.next_version }} --no-confirm --no-publish --no-push --execute
+      - name: Push release commit with GITHUB_TOKEN
+        run: |
+          git remote set-url origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          git push origin HEAD
+      - name: Push release tag with RELEASE_TOKEN
+        env:
+          TAG_NAME: v${{ steps.version.outputs.next_version }}
+        run: |
+          git remote add release "https://x-access-token:${{ secrets.RELEASE_TOKEN }}@github.com/${{ github.repository }}.git"
+          git push release "refs/tags/${TAG_NAME}"
