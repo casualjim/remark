@@ -1,8 +1,24 @@
+## [0.1.14] - 2026-01-02
+
+### 🚀 Features
+
+- Add comment list modal
+
+### 🐛 Bug Fixes
+
+- Replace editor and invalidate reviewed state
+- Clippy needless as_bytes
+
+### ⚙️ Miscellaneous Tasks
+
+- Format
 ## [0.1.13] - 2026-01-02
 
 ### ⚙️ Miscellaneous Tasks
 
 - Regenerate cargo-dist release workflow
+- Update changelog for v0.1.13 [ci skip]
+- Release remark version 0.1.13
 ## [0.1.12] - 2026-01-02
 
 ### 🐛 Bug Fixes
