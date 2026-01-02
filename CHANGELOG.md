@@ -1,3 +1,14 @@
+## [0.1.11] - 2026-01-02
+
+### ⚙️ Miscellaneous Tasks
+
+- Update cargo-dist release workflow
+## [0.1.10] - 2026-01-02
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.10 [ci skip]
+- Release remark version 0.1.10
 ## [0.1.9] - 2026-01-02
 
 ### 🐛 Bug Fixes
