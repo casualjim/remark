@@ -30,8 +30,10 @@ hyperpolyglot = "0.1"
 copypasta = "0.10"
 base64 = "0.22"
 unicode-width = "0.2"
-wl-clipboard-rs = "0.9"
 mimalloc = "0.1.48"
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+wl-clipboard-rs = "0.9"
 
 [dev-dependencies]
 tempfile = "3"
