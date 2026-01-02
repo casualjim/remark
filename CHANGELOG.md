@@ -1,8 +1,18 @@
+## [0.1.9] - 2026-01-02
+
+### 🐛 Bug Fixes
+
+- Avoid credential override when pushing tags
 ## [0.1.8] - 2026-01-02
 
 ### 🐛 Bug Fixes
 
 - Split release pushes by token
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.8 [ci skip]
+- Release remark version 0.1.8
 ## [0.1.7] - 2026-01-01
 
 ### 🐛 Bug Fixes
