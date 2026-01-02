@@ -1,8 +1,18 @@
+## [0.1.8] - 2026-01-02
+
+### 🐛 Bug Fixes
+
+- Split release pushes by token
 ## [0.1.7] - 2026-01-01
 
 ### 🐛 Bug Fixes
 
 - Correct release workflow triggers
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.7 [ci skip]
+- Release remark version 0.1.7 [ci skip]
 ## [0.1.6] - 2026-01-01
 
 ### ⚙️ Miscellaneous Tasks
