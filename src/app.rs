@@ -2615,7 +2615,7 @@ fn hash_part(h: &mut gix_hash::Hasher, label: &[u8], value: Option<&str>) {
     match value {
         Some(v) => {
             h.update(b"1\0");
-            let len = v.as_bytes().len().to_string();
+            let len = v.len().to_string();
             h.update(len.as_bytes());
             h.update(b"\0");
             h.update(v.as_bytes());
