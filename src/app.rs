@@ -137,7 +137,7 @@ impl Config {
 
 fn print_help_and_exit() -> ! {
     eprintln!(
-        "remark\n\nUSAGE:\n  remark [--ref <notes-ref>] [--base <ref>] [--ignored] [--view <all|staged|unstaged|base>] [--file <path> [--line <n> --side <old|new>]]\n  remark <command> [<args>]\n\nOPTIONS:\n  --ref <notes-ref>   Notes ref to store reviews (default: remark.notesRef or {default_notes_ref})\n  --base <ref>        Base ref for base view (default: @{{upstream}} / main / master)\n  --ignored           Include gitignored files in the file list\n  --view <kind>       Start in view (all/unstaged/staged/base)\n  --file <path>       Preselect a file when launching the UI\n  --line <n>          Preselect a 1-based line (requires --file)\n  --side <old|new>    Which side for line (default: new)\n\nSUBCOMMANDS:\n  prompt             Render a collated review prompt\n  resolve            Resolve or unresolve comments\n  new                Start a new review session (new notes ref)\n  purge              Delete all remark notes refs\n\nKEYS (browse):\n  h / l or Left/Right focus files/diff\n  1/2/3/4             all/unstaged/staged/base\n  i                   toggle unified/side-by-side diff\n  [ / ]               less/more diff context\n  I                   toggle showing ignored files\n  R                   reload file list\n  Up/Down, j/k        navigate (focused pane)\n  PgUp/PgDn           scroll (focused pane)\n  Ctrl+U / Ctrl+D     page up/down (focused pane)\n  Ctrl+N / Ctrl+P     next/prev unreviewed file (diff pane)\n  n                   next hunk (diff pane)\n  v                   toggle reviewed (selected file)\n  Enter               focus diff (from files)\n  c                   add/edit comment (file or line)\n  d                   delete comment (file or line)\n  r                   resolve/unresolve comment\n  p                   open prompt editor\n  ?                   help\n  Esc                 dismiss overlay or quit\n\nTIP:\n  With focus on Files, press `c` to add/edit a file-level comment for the selected file.\n\nKEYS (comment editor):\n  Enter               newline\n  Shift+Enter / Ctrl+S accept comment and close\n  Esc                 cancel\n\nKEYS (prompt editor):\n  Enter               newline\n  Shift+Enter / Ctrl+S copy prompt and close\n  Esc                 close prompt\n",
+    "remark\n\nUSAGE:\n  remark [--ref <notes-ref>] [--base <ref>] [--ignored] [--view <all|staged|unstaged|base>] [--file <path> [--line <n> --side <old|new>]]\n  remark <command> [<args>]\n\nOPTIONS:\n  --ref <notes-ref>   Notes ref to store reviews (default: remark.notesRef or {default_notes_ref})\n  --base <ref>        Base ref for base view (default: @{{upstream}} / main / master)\n  --ignored           Include gitignored files in the file list\n  --view <kind>       Start in view (all/unstaged/staged/base)\n  --file <path>       Preselect a file when launching the UI\n  --line <n>          Preselect a 1-based line (requires --file)\n  --side <old|new>    Which side for line (default: new)\n\nSUBCOMMANDS:\n  prompt             Render a collated review prompt\n  resolve            Resolve or unresolve comments\n  new                Start a new review session (new notes ref)\n  purge              Delete all remark notes refs\n\nKEYS (browse):\n  h / l or Left/Right focus files/diff\n  1/2/3/4             all/unstaged/staged/base\n  i                   toggle unified/side-by-side diff\n  [ / ]               less/more diff context\n  I                   toggle showing ignored files\n  R                   reload file list\n  Up/Down, j/k        navigate (focused pane)\n  PgUp/PgDn           scroll (focused pane)\n  Ctrl+U / Ctrl+D     page up/down (focused pane)\n  Ctrl+N / Ctrl+P     next/prev unreviewed file (diff pane)\n  n                   next hunk (diff pane)\n  v                   toggle reviewed (selected file)\n  Enter               focus diff (from files)\n  c                   add/edit comment (file or line)\n  d                   delete comment (file or line)\n  r                   resolve/unresolve comment\n  Shift+C             open comment list\n  p                   open prompt editor\n  ?                   help\n  Esc                 dismiss overlay or quit\n\nTIP:\n  With focus on Files, press `c` to add/edit a file-level comment for the selected file.\n\nKEYS (comment editor):\n  Enter               newline\n  Shift+Enter / Ctrl+S accept comment and close\n  Esc                 cancel\n\nKEYS (comment list):\n  Up/Down, j/k        move selection\n  Enter               select/unselect item\n  Shift+Enter         jump to location\n  Shift+R             resolve file comments\n  Delete              discard file comments\n  Esc                 close list\n\nKEYS (prompt editor):\n  Enter               newline\n  Shift+Enter / Ctrl+S copy prompt and close\n  Esc                 close prompt\n",
         default_notes_ref = crate::git::DEFAULT_NOTES_REF
     );
     std::process::exit(2);
@@ -148,6 +148,7 @@ pub(crate) enum Mode {
     Browse,
     EditComment,
     EditPrompt,
+    CommentList,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,6 +167,14 @@ pub(crate) enum CommentLocator {
 pub(crate) struct CommentTarget {
     pub(crate) path: String,
     pub(crate) locator: CommentLocator,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CommentListEntry {
+    pub(crate) path: String,
+    pub(crate) locator: CommentLocator,
+    pub(crate) body: String,
+    pub(crate) resolved: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -268,6 +277,9 @@ struct App {
     status: String,
     show_help: bool,
     show_prompt: bool,
+    comment_list: Vec<CommentListEntry>,
+    comment_list_selected: usize,
+    comment_list_marked: HashSet<usize>,
 
     highlighter: Highlighter,
 }
@@ -346,6 +358,9 @@ impl App {
             status: String::new(),
             show_help: false,
             show_prompt: false,
+            comment_list: Vec::new(),
+            comment_list_selected: 0,
+            comment_list_marked: HashSet::new(),
             highlighter,
         };
         app.reload_view()?;
@@ -446,6 +461,9 @@ impl App {
                             status: &self.status,
                             show_help: self.show_help,
                             show_prompt: self.show_prompt,
+                            comment_list: &self.comment_list,
+                            comment_list_selected: self.comment_list_selected,
+                            comment_list_marked: &self.comment_list_marked,
                         },
                     )
                 })
@@ -477,6 +495,7 @@ impl App {
             Mode::Browse => self.handle_browse_key(key),
             Mode::EditComment => self.handle_edit_key(key),
             Mode::EditPrompt => self.handle_prompt_key(key),
+            Mode::CommentList => self.handle_comment_list_key(key),
         }
     }
 
@@ -527,6 +546,12 @@ impl App {
 
         if key.code == KeyCode::Esc {
             return Ok(true);
+        }
+
+        let is_shift_c = matches!(key.code, KeyCode::Char('C'))
+            || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::SHIFT));
+        if is_shift_c && no_ctrl_alt {
+            return self.open_comment_list();
         }
 
         if key.code == KeyCode::Char('p') && key.modifiers.is_empty() {
@@ -712,6 +737,233 @@ impl App {
 
         self.prompt_buffer.input(key);
         Ok(false)
+    }
+
+    fn handle_comment_list_key(&mut self, key: KeyEvent) -> Result<bool> {
+        if key.code == KeyCode::Esc {
+            self.close_comment_list();
+            return Ok(false);
+        }
+
+        if self.comment_list.is_empty() {
+            return Ok(false);
+        }
+
+        let no_ctrl_alt = !key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::ALT);
+
+        if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT) {
+            self.jump_to_comment_list_entry()?;
+            return Ok(false);
+        }
+
+        let is_shift_r = matches!(key.code, KeyCode::Char('R'))
+            || (key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::SHIFT));
+        if is_shift_r && no_ctrl_alt {
+            self.resolve_comment_list_selection()?;
+            return Ok(false);
+        }
+
+        if key.code == KeyCode::Delete && no_ctrl_alt {
+            self.discard_comment_list_selection()?;
+            return Ok(false);
+        }
+
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => self.move_comment_list_selection(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_comment_list_selection(1),
+            KeyCode::PageUp => self.move_comment_list_selection(-10),
+            KeyCode::PageDown => self.move_comment_list_selection(10),
+            KeyCode::Home => self.comment_list_selected = 0,
+            KeyCode::End => {
+                self.comment_list_selected = self.comment_list.len().saturating_sub(1)
+            }
+            KeyCode::Enter if no_ctrl_alt => {
+                self.toggle_comment_list_mark();
+            }
+            _ => {}
+        }
+
+        Ok(false)
+    }
+
+    fn open_comment_list(&mut self) -> Result<bool> {
+        self.comment_list = self.build_comment_list();
+        if self.comment_list.is_empty() {
+            self.status = "No comments".to_string();
+            return Ok(false);
+        }
+        self.comment_list_selected = 0;
+        self.comment_list_marked.clear();
+        self.show_help = false;
+        self.show_prompt = false;
+        self.mode = Mode::CommentList;
+        Ok(false)
+    }
+
+    fn close_comment_list(&mut self) {
+        self.mode = Mode::Browse;
+        self.comment_list_marked.clear();
+    }
+
+    fn move_comment_list_selection(&mut self, delta: i32) {
+        if self.comment_list.is_empty() {
+            self.comment_list_selected = 0;
+            return;
+        }
+        let max = (self.comment_list.len() - 1) as i32;
+        let cur = self.comment_list_selected as i32;
+        self.comment_list_selected = (cur + delta).clamp(0, max) as usize;
+    }
+
+    fn toggle_comment_list_mark(&mut self) {
+        if self.comment_list.is_empty() {
+            return;
+        }
+        let idx = self.comment_list_selected;
+        if !self.comment_list_marked.insert(idx) {
+            self.comment_list_marked.remove(&idx);
+        }
+    }
+
+    fn comment_list_selected_paths(&self) -> Vec<String> {
+        if self.comment_list.is_empty() {
+            return Vec::new();
+        }
+        let indices: Vec<usize> = if self.comment_list_marked.is_empty() {
+            vec![self.comment_list_selected]
+        } else {
+            self.comment_list_marked.iter().copied().collect()
+        };
+        let mut paths = std::collections::BTreeSet::new();
+        for idx in indices {
+            if let Some(entry) = self.comment_list.get(idx) {
+                paths.insert(entry.path.clone());
+            }
+        }
+        paths.into_iter().collect()
+    }
+
+    fn resolve_comment_list_selection(&mut self) -> Result<()> {
+        let paths = self.comment_list_selected_paths();
+        if paths.is_empty() {
+            return Ok(());
+        }
+        for path in &paths {
+            if let Some(file) = self.review.files.get_mut(path) {
+                if let Some(c) = file.file_comment.as_mut() {
+                    c.resolved = true;
+                }
+                for c in file.comments.values_mut() {
+                    c.resolved = true;
+                }
+                if file.file_comment.is_none() && file.comments.is_empty() && !file.reviewed {
+                    self.review.files.remove(path);
+                }
+            }
+            self.persist_file_note(path)?;
+        }
+
+        self.comment_list = self.build_comment_list();
+        self.comment_list_selected = self
+            .comment_list_selected
+            .min(self.comment_list.len().saturating_sub(1));
+        self.comment_list_marked.clear();
+        self.status = format!("Resolved comments ({})", paths.len());
+        Ok(())
+    }
+
+    fn discard_comment_list_selection(&mut self) -> Result<()> {
+        let paths = self.comment_list_selected_paths();
+        if paths.is_empty() {
+            return Ok(());
+        }
+        for path in &paths {
+            if let Some(file) = self.review.files.get_mut(path) {
+                file.file_comment = None;
+                file.comments.clear();
+                if !file.reviewed {
+                    self.review.files.remove(path);
+                }
+            }
+            self.persist_file_note(path)?;
+        }
+
+        self.comment_list = self.build_comment_list();
+        self.comment_list_selected = self
+            .comment_list_selected
+            .min(self.comment_list.len().saturating_sub(1));
+        self.comment_list_marked.clear();
+        self.status = format!("Discarded comments ({})", paths.len());
+        Ok(())
+    }
+
+    fn jump_to_comment_list_entry(&mut self) -> Result<()> {
+        if self.comment_list.is_empty() {
+            return Ok(());
+        }
+        let entry = self.comment_list[self.comment_list_selected].clone();
+        let Some(idx) = self.files.iter().position(|e| e.path == entry.path) else {
+            self.status = format!("File not found: {}", entry.path);
+            return Ok(());
+        };
+        self.file_selected = idx;
+        self.reload_diff_for_selected()?;
+        match entry.locator {
+            CommentLocator::File => {
+                self.diff_cursor = 0;
+                self.focus = Focus::Diff;
+                self.close_comment_list();
+                return Ok(());
+            }
+            CommentLocator::Line { side, line } => {
+                let keep = match side {
+                    LineSide::Old => KeepLine::Old(line),
+                    LineSide::New => KeepLine::New(line),
+                };
+                if let Some(idx) = self.find_row_for_keep_line(keep) {
+                    self.diff_cursor = idx;
+                    self.focus = Focus::Diff;
+                    self.close_comment_list();
+                } else {
+                    self.status = format!("Line {line} not found in diff");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn build_comment_list(&self) -> Vec<CommentListEntry> {
+        let mut out = Vec::new();
+        for (path, file) in &self.review.files {
+            if let Some(c) = file
+                .file_comment
+                .as_ref()
+                .filter(|c| !c.body.trim().is_empty())
+            {
+                out.push(CommentListEntry {
+                    path: path.clone(),
+                    locator: CommentLocator::File,
+                    body: c.body.clone(),
+                    resolved: c.resolved,
+                });
+            }
+            for (k, c) in &file.comments {
+                if c.body.trim().is_empty() {
+                    continue;
+                }
+                out.push(CommentListEntry {
+                    path: path.clone(),
+                    locator: CommentLocator::Line {
+                        side: k.side,
+                        line: k.line,
+                    },
+                    body: c.body.clone(),
+                    resolved: c.resolved,
+                });
+            }
+        }
+        out
     }
 
     fn handle_mouse(&mut self, m: MouseEvent, rects: crate::ui::LayoutRects) -> Result<()> {

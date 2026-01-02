@@ -20,8 +20,8 @@ use tui_textarea::TextArea;
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::{
-    CommentLocator, CommentTarget, DiffViewMode, FileChangeKind, FileEntry, Focus, Mode, RenderRow,
-    SideBySideRow,
+    CommentListEntry, CommentLocator, CommentTarget, DiffViewMode, FileChangeKind, FileEntry,
+    Focus, Mode, RenderRow, SideBySideRow,
 };
 use crate::file_tree::FileTreeRow;
 use crate::git::ViewKind;
@@ -118,6 +118,9 @@ pub struct DrawState<'a> {
     pub status: &'a str,
     pub show_help: bool,
     pub show_prompt: bool,
+    pub comment_list: &'a [CommentListEntry],
+    pub comment_list_selected: usize,
+    pub comment_list_marked: &'a HashSet<usize>,
 }
 
 pub fn draw(f: &mut ratatui::Frame, s: DrawState<'_>) {
@@ -142,6 +145,9 @@ pub fn draw(f: &mut ratatui::Frame, s: DrawState<'_>) {
     }
     if s.mode == Mode::EditComment {
         draw_comment_editor(f, rects.diff, &s);
+    }
+    if s.mode == Mode::CommentList {
+        draw_comment_list(f, outer, &s);
     }
 }
 
@@ -702,6 +708,10 @@ fn draw_footer(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
             let s = "prompt editor  (Shift+Enter/Ctrl+S copy)  (Esc close)".to_string();
             fit_with_ellipsis(&s, area.width as usize)
         }
+        Mode::CommentList => {
+            let s = "comment list  (Enter select, Shift+Enter jump, Shift+R resolve, Delete discard, Esc close)".to_string();
+            fit_with_ellipsis(&s, area.width as usize)
+        }
     };
 
     // Notes are written immediately on accept/delete/resolve; we don't display an "unsaved" state.
@@ -763,6 +773,7 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect) {
         Line::from("  c                 Add/edit comment (file or line)"),
         Line::from("  d                 Delete comment (file or line)"),
         Line::from("  r                 Resolve/unresolve comment"),
+        Line::from("  Shift+C           Open comment list"),
         Line::from(""),
         Line::from("Review"),
         Line::from("  p                 Open prompt editor"),
@@ -777,6 +788,14 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect) {
         Line::from("Prompt editor"),
         Line::from("  Shift+Enter/Ctrl+S  Copy prompt and close"),
         Line::from("  Esc               Close prompt"),
+        Line::from(""),
+        Line::from("Comment list"),
+        Line::from("  Up/Down, j/k      Move selection"),
+        Line::from("  Enter             Select/unselect"),
+        Line::from("  Shift+Enter       Jump to location"),
+        Line::from("  Shift+R           Resolve file comments"),
+        Line::from("  Delete            Discard file comments"),
+        Line::from("  Esc               Close list"),
         Line::from(""),
         Line::from("Help"),
         Line::from("  ? or Esc          Close this help"),
@@ -806,6 +825,74 @@ fn draw_prompt(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
     let inner = block.inner(popup);
     f.render_widget(block, popup);
     render_wrapped_textarea(f, inner, s.prompt_buffer);
+}
+
+fn draw_comment_list(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
+    let popup = centered_rect(80, 80, area);
+    f.render_widget(Clear, popup);
+    let block = Block::default().borders(Borders::ALL).title(
+        "Comments  (Enter select, Shift+Enter jump, Shift+R resolve, Delete discard, Esc close)",
+    );
+
+    let inner = block.inner(popup);
+    let max_width = inner.width.max(1) as usize;
+    let height = inner.height.max(1) as usize;
+
+    let mut items = Vec::new();
+    if s.comment_list.is_empty() {
+        items.push(ListItem::new(Line::from("No comments.")));
+    } else {
+        for (idx, entry) in s.comment_list.iter().enumerate() {
+            let mark = if s.comment_list_marked.contains(&idx) {
+                "[x]"
+            } else {
+                "[ ]"
+            };
+            let status = if entry.resolved { "R" } else { " " };
+            let loc = match entry.locator {
+                CommentLocator::File => "file".to_string(),
+                CommentLocator::Line { side, line } => {
+                    let side = match side {
+                        crate::review::LineSide::Old => "old",
+                        crate::review::LineSide::New => "new",
+                    };
+                    format!("{side}:{line}")
+                }
+            };
+            let preview = entry
+                .body
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim_end();
+            let mut line = format!("{mark} {status} {loc} {} - {preview}", entry.path);
+            if line.len() > max_width {
+                line.truncate(max_width);
+            }
+            let style = if entry.resolved {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default()
+            };
+            items.push(ListItem::new(Line::from(Span::styled(line, style))));
+        }
+    }
+
+    let selected = if s.comment_list.is_empty() {
+        None
+    } else {
+        Some(s.comment_list_selected.min(s.comment_list.len().saturating_sub(1)))
+    };
+    let scroll = selected
+        .map(|sel| sel.saturating_add(1).saturating_sub(height))
+        .unwrap_or(0);
+    let mut state = ListState::default()
+        .with_selected(selected)
+        .with_offset(scroll);
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    f.render_stateful_widget(list, popup, &mut state);
 }
 
 fn draw_comment_editor(f: &mut ratatui::Frame, diff_area: Rect, s: &DrawState<'_>) {
