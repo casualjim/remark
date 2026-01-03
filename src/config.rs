@@ -68,6 +68,7 @@ pub enum Command {
     Resolve(ResolveCli),
     New(NewCli),
     Purge(PurgeCli),
+    Lsp(LspCli),
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -144,6 +145,13 @@ pub struct PurgeCli {
     /// Delete all remark notes refs (refs/notes/remark*).
     #[arg(long = "yes", short = 'y', action = ArgAction::SetTrue, required = true)]
     pub yes: bool,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct LspCli {
+    /// Include resolved comments in diagnostics/hover output.
+    #[arg(long = "include-resolved", action = ArgAction::SetTrue)]
+    pub include_resolved: bool,
 }
 
 pub fn load_config(global: &GlobalArgs, ui: &UiArgs) -> Result<AppConfig> {

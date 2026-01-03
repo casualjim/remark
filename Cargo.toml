@@ -35,6 +35,8 @@ copypasta = "0.10"
 base64 = "0.22"
 unicode-width = "0.2"
 mimalloc = "0.1.48"
+tower-lsp = "0.20"
+tokio = { version = "1", features = ["rt", "io-std", "io-util", "macros", "sync", "time"] }
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 wl-clipboard-rs = "0.9"

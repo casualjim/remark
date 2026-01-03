@@ -5,6 +5,7 @@ mod diff;
 mod file_tree;
 mod git;
 mod highlight;
+mod lsp;
 mod new_cmd;
 mod notes;
 mod prompt_cmd;
@@ -50,6 +51,14 @@ fn main() -> anyhow::Result<()> {
             let fetch_notes = config::resolve_fetch_notes(&cfg, global.fetch_notes);
             maybe_fetch_notes(&repo, &notes_ref, fetch_notes);
             resolve_cmd::run(&repo, &notes_ref, base_ref, cmd)
+        }
+        Some(config::Command::Lsp(cmd)) => {
+            let cfg = config::load_config(&global, &ui)?;
+            let notes_ref = config::resolve_notes_ref(&repo, &cfg, global.notes_ref.clone());
+            let base_ref = config::resolve_base_ref_optional(&cfg, global.base_ref.clone());
+            let fetch_notes = config::resolve_fetch_notes(&cfg, global.fetch_notes);
+            maybe_fetch_notes(&repo, &notes_ref, fetch_notes);
+            lsp::run(repo, notes_ref, base_ref, cmd)
         }
         None => {
             let cfg = config::load_config(&global, &ui)?;
