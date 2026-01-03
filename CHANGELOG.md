@@ -1,3 +1,16 @@
+## [0.1.15] - 2026-01-03
+
+### 🚀 Features
+
+- Include code snippets in prompt output
+
+### 🐛 Bug Fixes
+
+- Satisfy clippy
+
+### ⚙️ Miscellaneous Tasks
+
+- Fmt
 ## [0.1.14] - 2026-01-02
 
 ### 🚀 Features
@@ -12,6 +25,8 @@
 ### ⚙️ Miscellaneous Tasks
 
 - Format
+- Update changelog for v0.1.14 [ci skip]
+- Release remark version 0.1.14
 ## [0.1.13] - 2026-01-02
 
 ### ⚙️ Miscellaneous Tasks
