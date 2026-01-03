@@ -9,7 +9,7 @@ pub struct Comment {
     pub resolved: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
 pub enum LineSide {
     Old,
     New,

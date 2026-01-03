@@ -23,125 +23,18 @@ const MIN_DIFF_CONTEXT: u32 = 0;
 const MAX_DIFF_CONTEXT: u32 = 20;
 
 #[derive(Debug, Clone)]
-struct JumpTarget {
+pub(crate) struct JumpTarget {
     path: String,
     line: Option<LineKey>,
 }
 
 #[derive(Debug, Clone)]
-struct Config {
-    notes_ref: String,
-    base_ref: Option<String>,
-    show_ignored: bool,
-    view: ViewKind,
-    jump_target: Option<JumpTarget>,
-}
-
-impl Config {
-    fn from_env(repo: &gix::Repository) -> Result<Self> {
-        let mut notes_ref = crate::git::read_notes_ref(repo);
-        let mut base_ref: Option<String> = crate::git::default_base_ref(repo);
-        let mut show_ignored = false;
-        let mut view = ViewKind::All;
-        let mut jump_path: Option<String> = None;
-        let mut jump_line: Option<u32> = None;
-        let mut jump_side: Option<LineSide> = None;
-
-        let mut args = std::env::args().skip(1);
-        while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "--ref" => {
-                    if let Some(v) = args.next() {
-                        notes_ref = v;
-                    }
-                }
-                "--base" => {
-                    if let Some(v) = args.next() {
-                        base_ref = Some(v);
-                    }
-                }
-                "--ignored" => {
-                    show_ignored = true;
-                }
-                "--view" => {
-                    if let Some(v) = args.next() {
-                        view = parse_view_kind(&v)?;
-                    }
-                }
-                "--file" => {
-                    if let Some(v) = args.next() {
-                        jump_path = Some(v);
-                    }
-                }
-                "--line" => {
-                    if let Some(v) = args.next() {
-                        let parsed = v.parse::<u32>().context("parse --line")?;
-                        if parsed == 0 {
-                            anyhow::bail!("--line must be 1-based");
-                        }
-                        jump_line = Some(parsed);
-                    }
-                }
-                "--side" => {
-                    if let Some(v) = args.next() {
-                        jump_side = Some(parse_line_side(&v)?);
-                    }
-                }
-                "-h" | "--help" => {
-                    print_help_and_exit();
-                }
-                _ => {}
-            }
-        }
-
-        if (jump_line.is_some() || jump_side.is_some()) && jump_path.is_none() {
-            anyhow::bail!("--line/--side requires --file <path>");
-        }
-        if jump_line.is_none() && jump_side.is_some() {
-            anyhow::bail!("--side requires --line <n>");
-        }
-
-        let mut jump_target = jump_path.map(|mut path| {
-            if let Some(stripped) = path.strip_prefix("./") {
-                path = stripped.to_string();
-            }
-            if let Some(wd) = repo.workdir()
-                && std::path::Path::new(&path).is_absolute()
-                && let Ok(rel) = std::path::Path::new(&path).strip_prefix(wd)
-            {
-                path = rel.to_string_lossy().to_string();
-            }
-
-            let line = jump_line.map(|line| LineKey {
-                side: jump_side.unwrap_or(LineSide::New),
-                line,
-            });
-
-            JumpTarget { path, line }
-        });
-
-        if let Some(target) = jump_target.as_mut()
-            && target.path.is_empty()
-        {
-            anyhow::bail!("--file <path> must not be empty");
-        }
-
-        Ok(Self {
-            notes_ref,
-            base_ref,
-            show_ignored,
-            view,
-            jump_target,
-        })
-    }
-}
-
-fn print_help_and_exit() -> ! {
-    eprintln!(
-        "remark\n\nUSAGE:\n  remark [--ref <notes-ref>] [--base <ref>] [--ignored] [--view <all|staged|unstaged|base>] [--file <path> [--line <n> --side <old|new>]]\n  remark <command> [<args>]\n\nOPTIONS:\n  --ref <notes-ref>   Notes ref to store reviews (default: remark.notesRef or {default_notes_ref})\n  --base <ref>        Base ref for base view (default: @{{upstream}} / main / master)\n  --ignored           Include gitignored files in the file list\n  --view <kind>       Start in view (all/unstaged/staged/base)\n  --file <path>       Preselect a file when launching the UI\n  --line <n>          Preselect a 1-based line (requires --file)\n  --side <old|new>    Which side for line (default: new)\n\nSUBCOMMANDS:\n  prompt             Render a collated review prompt\n  resolve            Resolve or unresolve comments\n  new                Start a new review session (new notes ref)\n  purge              Delete all remark notes refs\n\nKEYS (browse):\n  h / l or Left/Right focus files/diff\n  1/2/3/4             all/unstaged/staged/base\n  i                   toggle unified/side-by-side diff\n  [ / ]               less/more diff context\n  I                   toggle showing ignored files\n  R                   reload file list\n  Up/Down, j/k        navigate (focused pane)\n  PgUp/PgDn           scroll (focused pane)\n  Ctrl+U / Ctrl+D     page up/down (focused pane)\n  Ctrl+N / Ctrl+P     next/prev unreviewed file (diff pane)\n  n                   next hunk (diff pane)\n  v                   toggle reviewed (selected file)\n  Enter               focus diff (from files)\n  c                   add/edit comment (file or line)\n  d                   delete comment (file or line)\n  r                   resolve/unresolve comment\n  Shift+C             open comment list\n  p                   open prompt editor\n  ?                   help\n  Esc                 dismiss overlay or quit\n\nTIP:\n  With focus on Files, press `c` to add/edit a file-level comment for the selected file.\n\nKEYS (comment editor):\n  Enter               newline\n  Shift+Enter / Ctrl+S accept comment and close\n  Esc                 cancel\n\nKEYS (comment list):\n  Up/Down, j/k        move selection\n  Enter               select/unselect item\n  Shift+Enter         jump to location\n  Shift+R             resolve file comments\n  Delete              discard file comments\n  Esc                 close list\n\nKEYS (prompt editor):\n  Enter               newline\n  Shift+Enter / Ctrl+S copy prompt and close\n  Esc                 close prompt\n",
-        default_notes_ref = crate::git::DEFAULT_NOTES_REF
-    );
-    std::process::exit(2);
+pub(crate) struct UiOptions {
+    pub(crate) notes_ref: String,
+    pub(crate) base_ref: Option<String>,
+    pub(crate) show_ignored: bool,
+    pub(crate) view: ViewKind,
+    pub(crate) jump_target: Option<JumpTarget>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,25 +109,62 @@ enum KeepLine {
     New(u32),
 }
 
-pub fn run() -> Result<()> {
-    let repo = gix::discover(std::env::current_dir().context("get current directory")?)
-        .context("discover git repository")?;
-    let config = Config::from_env(&repo)?;
-
+pub fn run(repo: gix::Repository, options: UiOptions) -> Result<()> {
     let mut ui = crate::ui::Ui::new()?;
 
     let mut app = App::new(
         repo,
-        config.notes_ref,
-        config.base_ref,
-        config.show_ignored,
-        config.view,
-        config.jump_target,
+        options.notes_ref,
+        options.base_ref,
+        options.show_ignored,
+        options.view,
+        options.jump_target,
     )?;
     let res = app.run_loop(&mut ui);
 
     ui.restore().ok();
     res
+}
+
+pub(crate) fn build_jump_target(
+    repo: &gix::Repository,
+    jump_path: Option<String>,
+    jump_line: Option<u32>,
+    jump_side: Option<LineSide>,
+) -> Result<Option<JumpTarget>> {
+    if (jump_line.is_some() || jump_side.is_some()) && jump_path.is_none() {
+        anyhow::bail!("--line/--side requires --file <path>");
+    }
+    if jump_line.is_none() && jump_side.is_some() {
+        anyhow::bail!("--side requires --line <n>");
+    }
+
+    let mut jump_target = jump_path.map(|mut path| {
+        if let Some(stripped) = path.strip_prefix("./") {
+            path = stripped.to_string();
+        }
+        if let Some(wd) = repo.workdir()
+            && std::path::Path::new(&path).is_absolute()
+            && let Ok(rel) = std::path::Path::new(&path).strip_prefix(wd)
+        {
+            path = rel.to_string_lossy().to_string();
+        }
+
+        let line = jump_line.map(|line| LineKey {
+            side: jump_side.unwrap_or(LineSide::New),
+            line,
+        });
+
+        JumpTarget { path, line }
+    });
+
+    if let Some(target) = jump_target.as_mut()
+        && target.path.is_empty()
+    {
+        anyhow::bail!("--file <path> must not be empty");
+    }
+
+    Ok(jump_target)
 }
 
 struct App {
@@ -2123,24 +2053,6 @@ fn parse_diff_view_mode(raw: &str) -> Option<DiffViewMode> {
 fn parse_diff_context(raw: &str) -> Option<u32> {
     let parsed = raw.trim().parse::<u32>().ok()?;
     Some(parsed.clamp(MIN_DIFF_CONTEXT, MAX_DIFF_CONTEXT))
-}
-
-fn parse_view_kind(raw: &str) -> Result<ViewKind> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "all" => Ok(ViewKind::All),
-        "unstaged" => Ok(ViewKind::Unstaged),
-        "staged" => Ok(ViewKind::Staged),
-        "base" => Ok(ViewKind::Base),
-        _ => anyhow::bail!("--view must be one of: all, unstaged, staged, base"),
-    }
-}
-
-fn parse_line_side(raw: &str) -> Result<LineSide> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "old" => Ok(LineSide::Old),
-        "new" => Ok(LineSide::New),
-        _ => anyhow::bail!("--side must be 'old' or 'new'"),
-    }
 }
 
 fn diff_view_mode_value(mode: DiffViewMode) -> &'static str {

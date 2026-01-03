@@ -10,7 +10,10 @@ authors = ["Ivan Porto Carrero <ivan@flanders.co.nz>"]
 
 [dependencies]
 anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+confique = { version = "0.4.0", features = ["toml", "json5", "yaml"] }
 crossterm = "0.28"
+dirs = "6"
 gix = { version = "0.77", features = ["revision", "tree-editor"] }
 gix-actor = "0.37.0"
 gix-date = "0.12.0"
