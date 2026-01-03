@@ -1,17 +1,25 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tower_lsp::jsonrpc::Result as LspResult;
 use tower_lsp::lsp_types::{
-    Diagnostic, DiagnosticSeverity, Hover, HoverContents, InitializeParams, InitializeResult,
-    InitializedParams, MarkupContent, MarkupKind, MessageType, Position, Range, ServerCapabilities,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Url,
+    CodeAction, CodeActionKind, CodeActionOptions, CodeActionOrCommand, CodeActionParams,
+    CodeActionProviderCapability, Command, Diagnostic, DiagnosticSeverity, ExecuteCommandOptions,
+    ExecuteCommandParams, Hover, HoverContents, InlayHint, InlayHintLabel,
+    InlayHintOptions, InlayHintParams, InlayHintServerCapabilities, InitializeParams,
+    InitializeResult, InitializedParams, MarkupContent, MarkupKind, MessageType, OneOf, Position,
+    Range, ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 use crate::config::LspCli;
 use crate::git::{self, ViewKind};
 use crate::review::{Comment, FileReview, LineKey, LineSide};
+
+const COMMAND_RESOLVE: &str = "remark.resolve";
+const COMMAND_UNRESOLVE: &str = "remark.unresolve";
 
 pub fn run(
     repo: gix::Repository,
@@ -48,6 +56,15 @@ struct Backend {
     notes_ref: String,
     base_ref: Option<String>,
     include_resolved: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ResolveArgs {
+    file: String,
+    line: Option<u32>,
+    side: Option<String>,
+    #[serde(default)]
+    file_comment: bool,
 }
 
 impl Backend {
@@ -162,6 +179,283 @@ impl Backend {
             range: None,
         })
     }
+
+    async fn inlay_hints_for(&self, uri: &Url, range: Range) -> Vec<InlayHint> {
+        let Ok(path) = uri.to_file_path() else {
+            return Vec::new();
+        };
+        let Some(rel_path) = self.to_repo_relative(&path) else {
+            return Vec::new();
+        };
+        let repo = match self.open_repo() {
+            Ok(repo) => repo,
+            Err(err) => {
+                self.log_error(err).await;
+                return Vec::new();
+            }
+        };
+        let review =
+            match load_file_review(&repo, &self.notes_ref, &rel_path, self.base_ref.as_deref()) {
+                Ok(review) => review,
+                Err(err) => {
+                    self.log_error(err).await;
+                    return Vec::new();
+                }
+            };
+        let Some(mut review) = review else {
+            return Vec::new();
+        };
+        if !self.include_resolved {
+            prune_resolved(&mut review);
+        }
+
+        let mut hints = Vec::new();
+        let start = range.start.line;
+        let end = range.end.line;
+
+        if let Some(comment) = &review.file_comment
+            && start == 0
+        {
+            let character = line_end_utf16(&path, 0).unwrap_or(0);
+            hints.push(make_inlay_hint(0, character, comment, None));
+        }
+
+        for (key, comment) in &review.comments {
+            let line_idx = key.line.saturating_sub(1);
+            if line_idx < start || line_idx > end {
+                continue;
+            }
+            let character = line_end_utf16(&path, line_idx).unwrap_or(0);
+            hints.push(make_inlay_hint(line_idx, character, comment, Some(key.side)));
+        }
+
+        hints
+    }
+
+    async fn code_actions_for(&self, uri: &Url, line_idx: u32) -> Vec<CodeActionOrCommand> {
+        let Ok(path) = uri.to_file_path() else {
+            return Vec::new();
+        };
+        let Some(rel_path) = self.to_repo_relative(&path) else {
+            return Vec::new();
+        };
+        let repo = match self.open_repo() {
+            Ok(repo) => repo,
+            Err(err) => {
+                self.log_error(err).await;
+                return Vec::new();
+            }
+        };
+        let review =
+            match load_file_review(&repo, &self.notes_ref, &rel_path, self.base_ref.as_deref()) {
+                Ok(review) => review,
+                Err(err) => {
+                    self.log_error(err).await;
+                    return Vec::new();
+                }
+            };
+        let Some(mut review) = review else {
+            return Vec::new();
+        };
+        if !self.include_resolved {
+            prune_resolved(&mut review);
+        }
+
+        let line = line_idx.saturating_add(1);
+        let mut actions = Vec::new();
+
+        if let Some(comment) = review.comments.get(&LineKey {
+            side: LineSide::New,
+            line,
+        }) {
+            actions.push(make_resolve_action(
+                &rel_path,
+                line,
+                LineSide::New,
+                comment.resolved,
+            ));
+        }
+        if let Some(comment) = review.comments.get(&LineKey {
+            side: LineSide::Old,
+            line,
+        }) {
+            actions.push(make_resolve_action(
+                &rel_path,
+                line,
+                LineSide::Old,
+                comment.resolved,
+            ));
+        }
+        if line_idx == 0
+            && let Some(comment) = review.file_comment.as_ref()
+        {
+            actions.push(make_file_comment_action(
+                &rel_path,
+                comment.resolved,
+            ));
+        }
+
+        actions
+    }
+
+    async fn execute_remark_command(&self, command: &str, args: ResolveArgs) {
+        let side = match args.side.as_deref() {
+            Some("old") => Some(LineSide::Old),
+            Some("new") => Some(LineSide::New),
+            Some(other) => {
+                self.log_error(anyhow::anyhow!("invalid side '{other}'"))
+                    .await;
+                return;
+            }
+            None => None,
+        };
+
+        let repo = match self.open_repo() {
+            Ok(repo) => repo,
+            Err(err) => {
+                self.log_error(err).await;
+                return;
+            }
+        };
+        let unresolve = matches!(command, COMMAND_UNRESOLVE);
+        let cmd = crate::config::ResolveCli {
+            file: Some(args.file.clone()),
+            line: args.line,
+            side,
+            file_comment: args.file_comment,
+            unresolve,
+        };
+        if let Err(err) = crate::resolve_cmd::run(&repo, &self.notes_ref, self.base_ref.clone(), cmd)
+        {
+            self.log_error(err).await;
+            return;
+        }
+
+        let path = self.repo_root.join(&args.file);
+        if let Ok(uri) = Url::from_file_path(path) {
+            self.publish_diagnostics(&uri).await;
+        }
+    }
+}
+
+fn line_end_utf16(path: &Path, line_idx: u32) -> Option<u32> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let line = content.lines().nth(line_idx as usize)?;
+    Some(line.encode_utf16().count() as u32)
+}
+
+fn inlay_label(comment: &Comment, side: Option<LineSide>) -> String {
+    let mut snippet = comment
+        .body
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    const MAX_LEN: usize = 80;
+    if snippet.len() > MAX_LEN {
+        snippet.truncate(MAX_LEN);
+        snippet.push('…');
+    }
+    let prefix = match side {
+        Some(LineSide::Old) => "[old] ",
+        Some(LineSide::New) => "",
+        None => "",
+    };
+    format!("remark: {prefix}{snippet}")
+}
+
+fn make_inlay_hint(
+    line_idx: u32,
+    character: u32,
+    comment: &Comment,
+    side: Option<LineSide>,
+) -> InlayHint {
+    InlayHint {
+        position: Position::new(line_idx, character),
+        label: InlayHintLabel::String(inlay_label(comment, side)),
+        kind: None,
+        text_edits: None,
+        tooltip: None,
+        padding_left: Some(true),
+        padding_right: Some(false),
+        data: None,
+    }
+}
+
+fn make_resolve_action(
+    file: &str,
+    line: u32,
+    side: LineSide,
+    resolved: bool,
+) -> CodeActionOrCommand {
+    let title = if resolved {
+        format!("Unresolve remark comment{}", format_side_label(side))
+    } else {
+        format!("Resolve remark comment{}", format_side_label(side))
+    };
+    let command = if resolved {
+        COMMAND_UNRESOLVE
+    } else {
+        COMMAND_RESOLVE
+    };
+    let args = ResolveArgs {
+        file: file.to_string(),
+        line: Some(line),
+        side: Some(match side {
+            LineSide::Old => "old".to_string(),
+            LineSide::New => "new".to_string(),
+        }),
+        file_comment: false,
+    };
+    let cmd = Command {
+        title: title.clone(),
+        command: command.to_string(),
+        arguments: Some(vec![serde_json::to_value(args).unwrap_or(Value::Null)]),
+    };
+    CodeActionOrCommand::CodeAction(CodeAction {
+        title,
+        kind: Some(CodeActionKind::QUICKFIX),
+        command: Some(cmd),
+        ..Default::default()
+    })
+}
+
+fn make_file_comment_action(file: &str, resolved: bool) -> CodeActionOrCommand {
+    let title = if resolved {
+        "Unresolve remark file comment".to_string()
+    } else {
+        "Resolve remark file comment".to_string()
+    };
+    let command = if resolved {
+        COMMAND_UNRESOLVE
+    } else {
+        COMMAND_RESOLVE
+    };
+    let args = ResolveArgs {
+        file: file.to_string(),
+        line: None,
+        side: None,
+        file_comment: true,
+    };
+    let cmd = Command {
+        title: title.clone(),
+        command: command.to_string(),
+        arguments: Some(vec![serde_json::to_value(args).unwrap_or(Value::Null)]),
+    };
+    CodeActionOrCommand::CodeAction(CodeAction {
+        title,
+        kind: Some(CodeActionKind::QUICKFIX),
+        command: Some(cmd),
+        ..Default::default()
+    })
+}
+
+fn format_side_label(side: LineSide) -> String {
+    match side {
+        LineSide::Old => " [old]".to_string(),
+        LineSide::New => "".to_string(),
+    }
 }
 
 #[tower_lsp::async_trait]
@@ -173,6 +467,23 @@ impl LanguageServer for Backend {
                     TextDocumentSyncKind::INCREMENTAL,
                 )),
                 hover_provider: Some(true.into()),
+                inlay_hint_provider: Some(OneOf::Right(InlayHintServerCapabilities::Options(
+                    InlayHintOptions {
+                        resolve_provider: Some(false),
+                        work_done_progress_options: Default::default(),
+                    },
+                ))),
+                code_action_provider: Some(CodeActionProviderCapability::Options(
+                    CodeActionOptions {
+                        code_action_kinds: Some(vec![CodeActionKind::QUICKFIX]),
+                        work_done_progress_options: Default::default(),
+                        resolve_provider: Some(false),
+                    },
+                )),
+                execute_command_provider: Some(ExecuteCommandOptions {
+                    commands: vec![COMMAND_RESOLVE.to_string(), COMMAND_UNRESOLVE.to_string()],
+                    work_done_progress_options: Default::default(),
+                }),
                 ..Default::default()
             },
             ..Default::default()
@@ -208,6 +519,43 @@ impl LanguageServer for Backend {
                 params.text_document_position_params.position,
             )
             .await)
+    }
+
+    async fn inlay_hint(&self, params: InlayHintParams) -> LspResult<Option<Vec<InlayHint>>> {
+        Ok(Some(
+            self.inlay_hints_for(&params.text_document.uri, params.range)
+                .await,
+        ))
+    }
+
+    async fn code_action(
+        &self,
+        params: CodeActionParams,
+    ) -> LspResult<Option<Vec<CodeActionOrCommand>>> {
+        Ok(Some(
+            self.code_actions_for(&params.text_document.uri, params.range.start.line)
+                .await,
+        ))
+    }
+
+    async fn execute_command(&self, params: ExecuteCommandParams) -> LspResult<Option<Value>> {
+        let Some(args) = params
+            .arguments
+            .into_iter()
+            .next()
+            .and_then(|value| serde_json::from_value::<ResolveArgs>(value).ok())
+        else {
+            return Ok(None);
+        };
+
+        match params.command.as_str() {
+            COMMAND_RESOLVE | COMMAND_UNRESOLVE => {
+                self.execute_remark_command(&params.command, args).await;
+            }
+            _ => {}
+        }
+
+        Ok(None)
     }
 }
 
@@ -308,9 +656,14 @@ fn build_diag(
     if let Some(key) = key {
         message = format!("{message} (line {})", key.line);
     }
+    let severity = if comment.resolved {
+        DiagnosticSeverity::HINT
+    } else {
+        DiagnosticSeverity::WARNING
+    };
     Diagnostic {
         range,
-        severity: Some(DiagnosticSeverity::HINT),
+        severity: Some(severity),
         source: Some("remark".to_string()),
         message,
         ..Default::default()
@@ -465,7 +818,7 @@ mod tests {
         assert_eq!(diag.range.end.line, 6);
         assert_eq!(diag.range.end.character, 0);
         assert_eq!(diag.source.as_deref(), Some("remark"));
-        assert_eq!(diag.severity, Some(DiagnosticSeverity::HINT));
+        assert_eq!(diag.severity, Some(DiagnosticSeverity::WARNING));
     }
 
     fn init_repo_with_commit(path: &str, contents: &str) -> (tempfile::TempDir, gix::Repository) {
@@ -793,6 +1146,31 @@ mod tests {
             serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": 2,
+                "method": "textDocument/inlayHint",
+                "params": {
+                    "textDocument": { "uri": file_uri },
+                    "range": {
+                        "start": { "line": 0, "character": 0 },
+                        "end": { "line": 0, "character": 0 }
+                    }
+                }
+            }),
+        )
+        .await;
+        let inlay_msg = wait_for_message(&mut client_read, |msg| msg.get("id") == Some(&2.into()))
+            .await;
+        let inlays = inlay_msg["result"].as_array().expect("inlays array");
+        assert!(inlays.iter().any(|hint| {
+            hint.get("label")
+                .and_then(|label| label.as_str())
+                .is_some_and(|label| label.contains("line note"))
+        }));
+
+        write_lsp_message(
+            &mut client_write,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 3,
                 "method": "textDocument/hover",
                 "params": {
                     "textDocument": { "uri": file_uri },
@@ -801,12 +1179,73 @@ mod tests {
             }),
         )
         .await;
-        let hover_msg = wait_for_message(&mut client_read, |msg| msg.get("id") == Some(&2.into()))
+        let hover_msg = wait_for_message(&mut client_read, |msg| msg.get("id") == Some(&3.into()))
             .await;
         let hover_contents = hover_msg["result"]["contents"]["value"]
             .as_str()
             .expect("hover contents");
         assert_eq!(hover_contents, "line note");
+
+        write_lsp_message(
+            &mut client_write,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "textDocument/codeAction",
+                "params": {
+                    "textDocument": { "uri": file_uri },
+                    "range": {
+                        "start": { "line": 0, "character": 0 },
+                        "end": { "line": 0, "character": 0 }
+                    },
+                    "context": { "diagnostics": [] }
+                }
+            }),
+        )
+        .await;
+        let actions_msg = wait_for_message(&mut client_read, |msg| msg.get("id") == Some(&4.into()))
+            .await;
+        let actions = actions_msg["result"]
+            .as_array()
+            .expect("actions array");
+        let resolve_action = actions
+            .iter()
+            .find(|action| {
+                action
+                    .get("title")
+                    .and_then(|title| title.as_str())
+                    .is_some_and(|title| title.starts_with("Resolve remark comment"))
+            })
+            .and_then(|action| action.get("command"))
+            .expect("resolve command");
+
+        write_lsp_message(
+            &mut client_write,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "workspace/executeCommand",
+                "params": resolve_action
+            }),
+        )
+        .await;
+        let _exec = wait_for_message(&mut client_read, |msg| msg.get("id") == Some(&5.into()))
+            .await;
+
+        let diagnostics_msg = wait_for_message(&mut client_read, |msg| {
+            msg.get("method")
+                .and_then(|m| m.as_str())
+                == Some("textDocument/publishDiagnostics")
+        })
+        .await;
+        let diagnostics = diagnostics_msg["params"]["diagnostics"]
+            .as_array()
+            .expect("diagnostics array");
+        let messages: Vec<String> = diagnostics
+            .iter()
+            .filter_map(|diag| diag.get("message").and_then(|m| m.as_str()).map(|s| s.to_string()))
+            .collect();
+        assert_eq!(messages, vec!["file note".to_string()]);
 
         server_task.abort();
     }
