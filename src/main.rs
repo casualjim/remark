@@ -7,6 +7,7 @@ mod highlight;
 mod new_cmd;
 mod notes;
 mod prompt_cmd;
+mod prompt_code;
 mod purge_cmd;
 mod resolve_cmd;
 mod review;
