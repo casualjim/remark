@@ -46,10 +46,10 @@ impl<'a> LineCodeResolver<'a> {
     pub fn line_code(&mut self, path: &str, key: LineKey) -> Option<String> {
         let views = self.view_order.clone();
         for view in views {
-            if let Some(map) = self.map_for_view_path(view, path) {
-                if let Some(code) = map.get(key) {
-                    return Some(code.clone());
-                }
+            if let Some(map) = self.map_for_view_path(view, path)
+                && let Some(code) = map.get(key)
+            {
+                return Some(code.clone());
             }
         }
         None
