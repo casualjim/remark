@@ -44,6 +44,7 @@ pub fn run(
             file_comment,
             cmd.line,
             side,
+            cmd.print_path,
         );
     }
 
@@ -176,6 +177,7 @@ fn write_draft(
     file_comment: bool,
     line: Option<u32>,
     side: Option<LineSide>,
+    print_path: bool,
 ) -> Result<()> {
     let path = draft_path(repo)?;
     if let Some(parent) = path.parent() {
@@ -229,7 +231,9 @@ fn write_draft(
     };
     let draft = render_draft(&meta, &current_body, line_code.as_deref());
     std::fs::write(&path, draft).context("write draft file")?;
-    println!("{}", path.display());
+    if print_path {
+        println!("{}", path.display());
+    }
     Ok(())
 }
 

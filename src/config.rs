@@ -175,6 +175,10 @@ pub struct AddCli {
     /// Apply the current draft file.
     #[arg(long = "apply", action = ArgAction::SetTrue)]
     pub apply: bool,
+
+    /// Print the draft path to stdout.
+    #[arg(long = "print-path", action = ArgAction::SetTrue)]
+    pub print_path: bool,
 }
 
 #[derive(Args, Debug, Clone, Default)]

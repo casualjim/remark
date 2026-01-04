@@ -151,24 +151,27 @@ This persists the note and removes the draft file.
 Notes:
 - Line comments default to the **new** side when `--side` is omitted.
 - The draft file lives inside `.git`, so it won't show up in git status.
-- If your repo uses a separate git dir (worktrees), `remark add --draft` prints the exact path.
+- If your repo uses a separate git dir (worktrees), use `--print-path` to get the exact draft path.
 
 ### Suggested Helix keybindings
 
-Pick keys that don't conflict with your setup. Example using Alt-modified keys:
+Pick keys that don't conflict with your setup. Example using Alt-modified keys.
+These bindings assume Helix is started in the repo root (so `.git/…` resolves).
+Note: the split commands require the draft file to exist, so run the draft
+command once before opening it.
 
 ```toml
 [keys.normal]
-A-r = ':run-shell-command cd %{workspace_directory} && remark add --draft --file %{buffer_name} --line %{cursor_line}'
-A-h = ':hsplit %{workspace_directory}/.git/remark/draft.md'
-A-v = ':vsplit %{workspace_directory}/.git/remark/draft.md'
-A-a = ':run-shell-command cd %{workspace_directory} && remark add --apply'
+A-r = ':run-shell-command remark add --draft --file %{buffer_name} --line %{cursor_line}'
+A-h = ':hsplit .git/remark/draft.md'
+A-v = ':vsplit .git/remark/draft.md'
+A-a = ':run-shell-command remark add --apply'
 ```
 
 Optional file-level comment draft:
 ```toml
 [keys.normal]
-A-f = ':run-shell-command cd %{workspace_directory} && remark add --draft --file %{buffer_name} --file-comment'
+A-f = ':run-shell-command remark add --draft --file %{buffer_name} --file-comment'
 ```
 
 ## Keybindings
