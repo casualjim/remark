@@ -66,6 +66,7 @@ pub struct GlobalArgs {
 pub enum Command {
     Prompt(PromptCli),
     Resolve(ResolveCli),
+    Add(AddCli),
     New(NewCli),
     Purge(PurgeCli),
     Lsp(LspCli),
@@ -135,6 +136,45 @@ pub struct ResolveCli {
     /// Mark comment as unresolved.
     #[arg(long = "unresolve", action = ArgAction::SetTrue)]
     pub unresolve: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct AddCli {
+    /// File to add a comment on.
+    #[arg(long = "file")]
+    pub file: Option<String>,
+
+    /// Line number (1-based).
+    #[arg(long = "line", value_parser = clap::value_parser!(u32).range(1..))]
+    pub line: Option<u32>,
+
+    /// Which side for line comments (default: new).
+    #[arg(long = "side", value_enum)]
+    pub side: Option<LineSide>,
+
+    /// Add/update the file-level comment.
+    #[arg(long = "file-comment", action = ArgAction::SetTrue)]
+    pub file_comment: bool,
+
+    /// Comment body (ignored when using --edit).
+    #[arg(long = "message", short = 'm')]
+    pub message: Option<String>,
+
+    /// Edit the comment body in $VISUAL/$EDITOR.
+    #[arg(long = "edit", action = ArgAction::SetTrue)]
+    pub edit: bool,
+
+    /// Editor command to use with --edit (overrides $VISUAL/$EDITOR).
+    #[arg(long = "editor")]
+    pub editor: Option<String>,
+
+    /// Write a draft file for editing in-editor.
+    #[arg(long = "draft", action = ArgAction::SetTrue)]
+    pub draft: bool,
+
+    /// Apply the current draft file.
+    #[arg(long = "apply", action = ArgAction::SetTrue)]
+    pub apply: bool,
 }
 
 #[derive(Args, Debug, Clone, Default)]

@@ -125,6 +125,52 @@ remark resolve --file src/lib.rs --line 10 --side old
 remark resolve --file src/lib.rs --line 42 --unresolve
 ```
 
+## Helix integration (draft workflow)
+
+Helix is great for **browsing** remarks via the LSP (diagnostics, hover, inlay hints),
+but it doesn't provide an inline prompt for entering new comments. The draft workflow
+keeps everything in the same Helix session:
+
+1) Create/update a draft for the current file/line:
+```bash
+remark add --draft --file src/lib.rs --line 42
+```
+This writes `.git/remark/draft.md` with:
+- Metadata (file/line/side)
+- Optional diff context
+- A ` ```text ... ``` ` block for your comment body
+
+2) Open the draft in a split, edit the text block.
+
+3) Apply the draft:
+```bash
+remark add --apply
+```
+This persists the note and removes the draft file.
+
+Notes:
+- Line comments default to the **new** side when `--side` is omitted.
+- The draft file lives inside `.git`, so it won't show up in git status.
+- If your repo uses a separate git dir (worktrees), `remark add --draft` prints the exact path.
+
+### Suggested Helix keybindings
+
+Pick keys that don't conflict with your setup. Example using Alt-modified keys:
+
+```toml
+[keys.normal]
+A-r = ':run-shell-command cd %{workspace_directory} && remark add --draft --file %{buffer_name} --line %{cursor_line}'
+A-h = ':hsplit %{workspace_directory}/.git/remark/draft.md'
+A-v = ':vsplit %{workspace_directory}/.git/remark/draft.md'
+A-a = ':run-shell-command cd %{workspace_directory} && remark add --apply'
+```
+
+Optional file-level comment draft:
+```toml
+[keys.normal]
+A-f = ':run-shell-command cd %{workspace_directory} && remark add --draft --file %{buffer_name} --file-comment'
+```
+
 ## Keybindings
 
 ### Global / browse mode
