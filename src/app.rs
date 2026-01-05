@@ -1950,16 +1950,16 @@ impl App {
                         .set_line_comment(&target.path, side, line, comment)
                 }
             }
-            if let CommentLocator::Line { side, line } = target.locator {
-                if let Some(hash) = crate::add_cmd::current_snippet_hash(
+            if let CommentLocator::Line { side, line } = target.locator
+                && let Some(hash) = crate::add_cmd::current_snippet_hash(
                     &self.repo,
                     self.base_ref.as_deref(),
                     &target.path,
                     crate::review::LineKey { side, line },
-                ) {
-                    self.review
-                        .set_line_comment_snippet_hash(&target.path, side, line, Some(hash));
-                }
+                )
+            {
+                self.review
+                    .set_line_comment_snippet_hash(&target.path, side, line, Some(hash));
             }
             self.persist_file_note(&target.path)?;
             self.status = "Saved".to_string();

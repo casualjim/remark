@@ -2,8 +2,6 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use ignore::WalkBuilder;
-use ignore::overrides::OverrideBuilder;
 use notify::{RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -565,7 +563,6 @@ impl Backend {
 
         if let Err(err) = crate::add_cmd::run(&repo, &self.notes_ref, self.base_ref.clone(), cmd) {
             self.log_error(err).await;
-            return;
         }
     }
 
@@ -697,38 +694,19 @@ fn sync_once(root: &Path, notes_ref: &str, base_ref: Option<&str>) -> Result<()>
 }
 
 fn should_sync_path(root: &Path, path: &Path) -> bool {
-    if let (Ok(abs), Ok(root_abs)) = (std::fs::canonicalize(path), std::fs::canonicalize(root)) {
-        if !abs.starts_with(&root_abs) {
-            return false;
-        }
-    }
-
-    let mut overrides = OverrideBuilder::new(root);
-    let candidate = match path.strip_prefix(root) {
-        Ok(rel) => rel,
-        Err(_) => path,
-    };
-    if overrides.add(&candidate.to_string_lossy()).is_err() {
+    // Check if path is within root
+    if let (Ok(abs), Ok(root_abs)) = (std::fs::canonicalize(path), std::fs::canonicalize(root))
+        && !abs.starts_with(&root_abs)
+    {
         return false;
     }
-    let overrides = match overrides.build() {
-        Ok(overrides) => overrides,
-        Err(_) => return false,
-    };
 
-    let mut builder = WalkBuilder::new(root);
-    builder.overrides(overrides);
-
-    for entry in builder.build().flatten() {
-        if entry.path() == path {
-            if let Some(ft) = entry.file_type() {
-                return ft.is_file();
-            }
-            return false;
-        }
+    // Check if it's a regular file (not a directory or symlink)
+    // This is much more efficient than walking the entire tree
+    match std::fs::metadata(path) {
+        Ok(metadata) => metadata.is_file(),
+        Err(_) => false,
     }
-
-    false
 }
 
 fn inlay_label(comment: &Comment, side: Option<LineSide>) -> String {
@@ -973,16 +951,13 @@ impl LanguageServer for Backend {
                 Ok(())
             })();
 
-            match result {
-                Err(err) => {
-                    client
-                        .log_message(
-                            MessageType::ERROR,
-                            format!("remark-lsp: init sync failed: {err:#}"),
-                        )
-                        .await;
-                }
-                Ok(()) => {}
+            if let Err(err) = result {
+                client
+                    .log_message(
+                        MessageType::ERROR,
+                        format!("remark-lsp: init sync failed: {err:#}"),
+                    )
+                    .await;
             }
         });
     }

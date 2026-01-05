@@ -108,12 +108,9 @@ pub fn run(
         let line = cmd.line.context("missing --line <n>")?;
         let side = side.context("missing --side <old|new>")?;
         review.set_line_comment(&file, side, line, body);
-        if let Some(hash) = current_snippet_hash(
-            repo,
-            base_ref.as_deref(),
-            &file,
-            LineKey { side, line },
-        ) {
+        if let Some(hash) =
+            current_snippet_hash(repo, base_ref.as_deref(), &file, LineKey { side, line })
+        {
             review.set_line_comment_snippet_hash(&file, side, line, Some(hash));
         }
     }
@@ -717,11 +714,11 @@ fn sync_draft_notes_with_mode(
                 draft_body.is_some() || notes_body.is_some()
             };
             if invalid {
-                if notes_body.is_some() {
-                    if let Some(comment) = notes_file.comments.get_mut(&key) {
-                        comment.resolved = true;
-                        notes_dirty = true;
-                    }
+                if notes_body.is_some()
+                    && let Some(comment) = notes_file.comments.get_mut(&key)
+                {
+                    comment.resolved = true;
+                    notes_dirty = true;
                 }
                 if draft_body.is_some() {
                     draft_file.comments.remove(&key);
@@ -730,14 +727,17 @@ fn sync_draft_notes_with_mode(
                 continue;
             }
 
-            if notes_body.is_some() && notes_hash.is_none() && snippet_present {
-                if let Some(comment) = notes_file.comments.get_mut(&key) {
-                    comment.snippet_hash = draft_hash.clone().or(current_hash.clone());
-                    notes_dirty = true;
-                }
+            if notes_body.is_some()
+                && notes_hash.is_none()
+                && snippet_present
+                && let Some(comment) = notes_file.comments.get_mut(&key)
+            {
+                comment.snippet_hash = draft_hash.clone().or(current_hash.clone());
+                notes_dirty = true;
             }
 
-            let draft_hash_missing = draft_body.is_some() && draft_hash.is_none() && notes_body.is_some();
+            let draft_hash_missing =
+                draft_body.is_some() && draft_hash.is_none() && notes_body.is_some();
             let draft_valid = draft_body.is_some() && snippet_present && !draft_hash_missing;
             let notes_valid = notes_body.is_some() && snippet_present;
 
@@ -1080,10 +1080,8 @@ pub(crate) fn write_draft_from_review(
                 continue;
             }
             if let Some(hash) = comment.snippet_hash.as_ref() {
-                preferred_hashes.insert(
-                    meta_key(path, side_label(key.side), key.line),
-                    hash.clone(),
-                );
+                preferred_hashes
+                    .insert(meta_key(path, side_label(key.side), key.line), hash.clone());
             }
         }
     }
@@ -1586,8 +1584,7 @@ Old note
 
         write_notes_file_comment(&repo, notes_ref, "src/lib.rs", "after");
 
-        sync_draft_notes_with_mode(&repo, notes_ref, None, DraftSyncMode::Passive)
-            .expect("sync");
+        sync_draft_notes_with_mode(&repo, notes_ref, None, DraftSyncMode::Passive).expect("sync");
         let draft_review =
             load_draft_review(&draft_path(&repo).expect("draft path")).expect("load draft");
         assert_eq!(draft_review.file_comment("src/lib.rs"), Some("after"));
@@ -1652,8 +1649,7 @@ Old note
         write_notes_file_comment(&repo, notes_ref, "src/lib.rs", "notes-new");
         set_draft_mtime_relative(&repo, notes_ref, -10);
 
-        sync_draft_notes_with_mode(&repo, notes_ref, None, DraftSyncMode::Passive)
-            .expect("sync");
+        sync_draft_notes_with_mode(&repo, notes_ref, None, DraftSyncMode::Passive).expect("sync");
 
         let draft_review =
             load_draft_review(&draft_path(&repo).expect("draft path")).expect("load draft");
@@ -1695,8 +1691,7 @@ Old note
 
         persist_file_review(&repo, notes_ref, "src/lib.rs", None).expect("remove note");
 
-        sync_draft_notes_with_mode(&repo, notes_ref, None, DraftSyncMode::Passive)
-            .expect("sync");
+        sync_draft_notes_with_mode(&repo, notes_ref, None, DraftSyncMode::Passive).expect("sync");
         let draft_review =
             load_draft_review(&draft_path(&repo).expect("draft path")).expect("load draft");
         assert!(draft_review.file_comment("src/lib.rs").is_none());
@@ -1721,8 +1716,7 @@ Old note
         meta.lines.clear();
         write_draft_meta(&draft_meta_path(&repo).expect("meta path"), &meta).expect("write meta");
 
-        sync_draft_notes_with_mode(&repo, notes_ref, None, DraftSyncMode::Passive)
-            .expect("sync");
+        sync_draft_notes_with_mode(&repo, notes_ref, None, DraftSyncMode::Passive).expect("sync");
         let draft_review =
             load_draft_review(&draft_path(&repo).expect("draft path")).expect("load draft");
         assert_eq!(
@@ -1733,8 +1727,11 @@ Old note
 
     #[test]
     fn sync_line_comment_removes_when_invalidated() {
-        let (_td, repo) = init_repo_with_commit("src/lib.rs", "fn main() {}
-");
+        let (_td, repo) = init_repo_with_commit(
+            "src/lib.rs",
+            "fn main() {}
+",
+        );
         let notes_ref = crate::git::DEFAULT_NOTES_REF;
 
         let mut review = Review::new();
@@ -1749,23 +1746,25 @@ Old note
             "fn main() { println!(\"hi\"); }\n",
         )
         .expect("write updated file");
-        sync_draft_notes_with_mode(&repo, notes_ref, None, DraftSyncMode::Passive)
-            .expect("sync");
+        sync_draft_notes_with_mode(&repo, notes_ref, None, DraftSyncMode::Passive).expect("sync");
         let draft_review =
             load_draft_review(&draft_path(&repo).expect("draft path")).expect("load draft");
-        assert!(draft_review
-            .line_comment("src/lib.rs", LineSide::New, 1)
-            .is_none());
-        let notes_review =
-            load_file_review(&repo, notes_ref, "src/lib.rs").expect("load notes");
+        assert!(
+            draft_review
+                .line_comment("src/lib.rs", LineSide::New, 1)
+                .is_none()
+        );
+        let notes_review = load_file_review(&repo, notes_ref, "src/lib.rs").expect("load notes");
         let notes_review = notes_review.expect("notes review");
-        assert!(notes_review
-            .comments
-            .get(&LineKey {
-                side: LineSide::New,
-                line: 1
-            })
-            .is_some_and(|c| c.resolved));
+        assert!(
+            notes_review
+                .comments
+                .get(&LineKey {
+                    side: LineSide::New,
+                    line: 1
+                })
+                .is_some_and(|c| c.resolved)
+        );
     }
 
     #[test]
