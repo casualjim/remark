@@ -323,9 +323,7 @@ impl Backend {
         let mut actions = Vec::new();
 
         actions.push(make_draft_comment_action(&rel_path, line, LineSide::New));
-        if line_idx == 0 {
-            actions.push(make_draft_file_comment_action(&rel_path));
-        }
+        actions.push(make_draft_file_comment_action(&rel_path));
 
         if let Some(comment) = review.comments.get(&LineKey {
             side: LineSide::New,
@@ -349,9 +347,7 @@ impl Backend {
                 comment.resolved,
             ));
         }
-        if line_idx == 0
-            && let Some(comment) = review.file_comment.as_ref()
-        {
+        if let Some(comment) = review.file_comment.as_ref() {
             actions.push(make_file_comment_action(&rel_path, comment.resolved));
         }
 

@@ -979,12 +979,32 @@ pub(crate) fn load_review_from_draft(
     Ok(draft_to_review(&draft))
 }
 
+#[cfg(test)]
 pub(crate) fn write_draft_from_review(
     repo: &gix::Repository,
     notes_ref: &str,
     base_ref: Option<&str>,
     review: &Review,
 ) -> Result<()> {
+    let draft_review = write_draft_from_review_impl(repo, base_ref, review)?;
+    rebuild_draft_meta(repo, notes_ref, base_ref, &draft_review)?;
+    Ok(())
+}
+
+pub(crate) fn write_draft_from_review_no_meta(
+    repo: &gix::Repository,
+    base_ref: Option<&str>,
+    review: &Review,
+) -> Result<()> {
+    let _ = write_draft_from_review_impl(repo, base_ref, review)?;
+    Ok(())
+}
+
+fn write_draft_from_review_impl(
+    repo: &gix::Repository,
+    base_ref: Option<&str>,
+    review: &Review,
+) -> Result<DraftReview> {
     let draft_review = review_to_draft(review);
     let path = draft_path(repo)?;
     if let Some(parent) = path.parent() {
@@ -992,8 +1012,7 @@ pub(crate) fn write_draft_from_review(
     }
     let draft = render_prompt_draft(repo, base_ref, &draft_review);
     std::fs::write(&path, draft).context("write draft file")?;
-    rebuild_draft_meta(repo, notes_ref, base_ref, &draft_review)?;
-    Ok(())
+    Ok(draft_review)
 }
 
 fn render_prompt_draft(

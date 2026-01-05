@@ -2006,9 +2006,8 @@ impl App {
     }
 
     fn persist_file_note(&mut self, path: &str) -> Result<()> {
-        crate::add_cmd::write_draft_from_review(
+        crate::add_cmd::write_draft_from_review_no_meta(
             &self.repo,
-            &self.notes_ref,
             self.base_ref.as_deref(),
             &self.review,
         )?;
