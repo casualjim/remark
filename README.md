@@ -127,15 +127,74 @@ remark resolve --file src/lib.rs --line 42 --unresolve
 
 ## Helix integration (LSP workflow)
 
-Helix supports the remark LSP code actions, so you can open draft comments directly
-from the editor without custom tasks. Use the code action on a line (or file header)
-to open a draft comment, edit `.git/remark/draft.md`, and save; the LSP will sync
-draft changes back into notes.
+Two configuration files give you a seamless flow: keybindings to open the draft,
+and language-server wiring so remark shows code actions and syncs on save.
 
-If the LSP isn't running, you can apply and clean up the draft manually:
-```bash
-remark add --apply
+### 1) Keybindings (open the draft)
+
+In `~/.config/helix/config.toml`:
+
+```toml
+[keys.normal]
+A-h = ':hsplit .git/remark/draft.md'
+A-v = ':vsplit .git/remark/draft.md'
 ```
+
+These bindings open the repo’s draft file in a split. For best results, start
+Helix from the repo root so `.git/remark/draft.md` resolves correctly.
+
+### 2) Language server configuration
+
+In `~/.config/helix/languages.toml`:
+
+```toml
+[language-server.remark]
+command = "remark"
+args = ["lsp"]
+required-root-patterns = [".git"]
+
+# TypeScript / TSX
+[[language]]
+name = "typescript"
+language-servers = ["remark", "typescript-language-server"]
+
+[[language]]
+name = "tsx"
+language-servers = ["remark", "typescript-language-server"]
+
+# Go
+[[language]]
+name = "go"
+language-servers = ["remark", "gopls"]
+
+# Python
+[[language]]
+name = "python"
+language-servers = ["remark", "pyright"]
+
+# Shell (pick what you use)
+[[language]]
+name = "bash"
+language-servers = ["remark", "bash-language-server"]
+
+[[language]]
+name = "toml"
+language-servers = [ "crates-lsp", "taplo" ]
+formatter = { command = "taplo", args = ["fmt", "-"] }
+
+[[language]]
+name = "rust"
+roots = ["Cargo.toml", "Cargo.lock"]
+language-servers = [
+  "remark",
+  "rust-analyzer"
+]
+```
+
+Workflow:
+1) Use the remark code action on a line or file header to seed a comment.
+2) Press `Alt-h` / `Alt-v` to open the draft.
+3) Edit and save; the LSP syncs draft changes back into notes.
 
 ## Zed integration
 
@@ -194,7 +253,7 @@ Create a project-local tasks file at `.zed/tasks.json` (in the repo root):
 ```
 
 Notes:
-- Requires the `zed` CLI to be on your PATH.
+- Requires the `zed` CLI to be on your PATH. (you may need to symlink: `sudo ln -sf /usr/bin/zeditor /usr/bin/zed`)
 - The draft file is inside `.git`, so it won't show up in git status.
 
 To run the task, open the command palette and use **task: spawn**, then pick the
