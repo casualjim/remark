@@ -8,42 +8,6 @@ homepage = "https://github.com/casualjim/remark"
 description = "Terminal-first code review notes for Git repos."
 authors = ["Ivan Porto Carrero <ivan@flanders.co.nz>"]
 
-[dependencies]
-anyhow = "1"
-crossterm = "0.28"
-gix = { version = "0.77", features = ["revision", "tree-editor"] }
-gix-actor = "0.37.0"
-gix-date = "0.12.0"
-gix-dir = "0.19.0"
-gix-hash = "0.21"
-gix-object = "0.54.0"
-gix-ref = "0.57.0"
-ratatui = "0.29"
-tui-textarea = "0.7"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-smallvec = "1"
-gix-diff = "0.57.0"
-syntastica = "0.6"
-syntastica-parsers = { version = "0.6", features = ["all"] }
-syntastica-themes = "0.6"
-hyperpolyglot = "0.1"
-copypasta = "0.10"
-base64 = "0.22"
-unicode-width = "0.2"
-mimalloc = "0.1.48"
-
-[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
-wl-clipboard-rs = "0.9"
-
-[dev-dependencies]
-tempfile = "3"
-
-# The profile that 'dist' will build with
-[profile.dist]
-inherits = "release"
-lto = "thin"
-
 [package.metadata.dist]
 install-updater = true
 
@@ -59,3 +23,45 @@ upgrade-guid = "57638460-6758-438B-A317-03146D8FE5F7"
 path-guid = "315F95A5-592C-410D-A239-585E74B1C1F4"
 license = false
 eula = false
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+confique = { version = "0.4.0", features = ["toml", "json5", "yaml"] }
+copypasta = "0.10"
+crossterm = "0.28"
+dirs = "6"
+gix = { version = "0.77", features = ["revision", "tree-editor"] }
+gix-actor = "0.37.0"
+gix-date = "0.12.0"
+gix-diff = "0.57.0"
+gix-dir = "0.19.0"
+gix-hash = "0.21"
+gix-object = "0.54.0"
+gix-ref = "0.57.0"
+hyperpolyglot = "0.1"
+mimalloc = "0.1.48"
+ratatui = "0.29"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+smallvec = "1"
+syntastica = "0.6"
+syntastica-parsers = { version = "0.6", features = ["all"] }
+syntastica-themes = "0.6"
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "io-std", "io-util", "macros", "sync", "time"] }
+tower-lsp = "0.20"
+tui-textarea = "0.7"
+unicode-width = "0.2"
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+wl-clipboard-rs = "0.9"
+
+[dev-dependencies]
+filetime = "0.2"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

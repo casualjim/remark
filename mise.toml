@@ -1,0 +1,13 @@
+[settings]
+experimental = true
+
+[tools]
+hk = "latest"
+pkl = "latest"
+rust = "latest"
+
+[env]
+_.file = ".env.json"
+
+[tasks.test]
+run = "cargo test --all"

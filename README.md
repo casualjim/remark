@@ -125,6 +125,173 @@ remark resolve --file src/lib.rs --line 10 --side old
 remark resolve --file src/lib.rs --line 42 --unresolve
 ```
 
+## Helix integration (LSP workflow)
+
+Two configuration files give you a seamless flow: keybindings to open the draft,
+and language-server wiring so remark shows code actions and syncs on save.
+
+### 1) Keybindings (open the draft)
+
+In `~/.config/helix/config.toml`:
+
+```toml
+[keys.normal]
+A-h = ':hsplit .git/remark/draft.md'
+A-v = ':vsplit .git/remark/draft.md'
+```
+
+These bindings open the repo’s draft file in a split. For best results, start
+Helix from the repo root so `.git/remark/draft.md` resolves correctly.
+
+### 2) Language server configuration
+
+In `~/.config/helix/languages.toml`:
+
+```toml
+[language-server.remark]
+command = "remark"
+args = ["lsp"]
+required-root-patterns = [".git"]
+
+# TypeScript / TSX
+[[language]]
+name = "typescript"
+language-servers = ["remark", "typescript-language-server"]
+
+[[language]]
+name = "tsx"
+language-servers = ["remark", "typescript-language-server"]
+
+# Go
+[[language]]
+name = "go"
+language-servers = ["remark", "gopls"]
+
+# Python
+[[language]]
+name = "python"
+language-servers = ["remark", "pyright"]
+
+# Shell (pick what you use)
+[[language]]
+name = "bash"
+language-servers = ["remark", "bash-language-server"]
+
+[[language]]
+name = "toml"
+language-servers = [ "crates-lsp", "taplo" ]
+formatter = { command = "taplo", args = ["fmt", "-"] }
+
+[[language]]
+name = "rust"
+roots = ["Cargo.toml", "Cargo.lock"]
+language-servers = [
+  "remark",
+  "rust-analyzer"
+]
+```
+
+Workflow:
+1) Use the remark code action on a line or file header to seed a comment.
+2) Press `Alt-h` / `Alt-v` to open the draft.
+3) Edit and save; the LSP syncs draft changes back into notes.
+
+## Zed integration
+
+Zed only starts custom language servers when they are registered by an extension.
+
+### Install the extension (users)
+
+Install `remark-lsp` from Zed's extensions UI.
+
+### Install the dev extension (maintainers)
+
+Use the dev extension while iterating locally:
+
+1) In Zed, open the command palette and choose **Extensions: Install Dev Extension**.
+2) Select the folder `zed-extension/remark-lsp` in this repo.
+
+### Configure languages
+
+Add `remark-lsp` to the languages you want, and keep defaults with `...`:
+
+```json
+{
+  "languages": {
+    "Rust": { "language_servers": ["remark-lsp", "..."] },
+    "Go": { "language_servers": ["remark-lsp", "..."] },
+    "TypeScript": { "language_servers": ["remark-lsp", "..."] },
+    "TSX": { "language_servers": ["remark-lsp", "..."] }
+  }
+}
+```
+
+The extension resolves the `remark` binary from your PATH, then runs `remark lsp`.
+If Zed can't find it, make sure `$HOME/.cargo/bin` is in the PATH Zed sees.
+You can pass extra LSP flags via `REMARK_LSP_ARGS`, for example:
+
+```bash
+REMARK_LSP_ARGS="--no-inlay-hints" zed
+```
+
+### Draft workflow (tasks)
+
+Zed doesn't yet support the LSP `showDocument` flow that remark uses to open the draft,
+so use a task to open `.git/remark/draft.md`. First, use the code action to mark a line
+or file for comment, then open the draft file via a task.
+
+Create a project-local tasks file at `.zed/tasks.json` (in the repo root):
+
+```json
+[
+  {
+    "label": "remark: open draft",
+    "command": "path=$(remark draft) && zed \"$path\"",
+    "cwd": "$ZED_WORKTREE_ROOT"
+  }
+]
+```
+
+Notes:
+- Requires the `zed` CLI to be on your PATH. (you may need to symlink: `sudo ln -sf /usr/bin/zeditor /usr/bin/zed`)
+- The draft file is inside `.git`, so it won't show up in git status.
+
+To run the task, open the command palette and use **task: spawn**, then pick the
+`remark: open draft ...` entry.
+
+## VS Code integration
+
+VS Code doesn’t start arbitrary language servers without an extension, and we
+don’t ship a VS Code extension yet. You can still use remark via the CLI and a
+task to open the draft.
+
+### Draft workflow (tasks)
+
+Create a project-local tasks file at `.vscode/tasks.json`:
+
+```json
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "remark: open draft",
+      "type": "shell",
+      "command": "bash",
+      "args": ["-lc", "code \"$(remark draft)\""]
+    }
+  ]
+}
+```
+
+Notes:
+- Requires the `code` CLI to be on your PATH.
+- The draft file is inside `.git`, so it won’t show up in git status.
+
+Workflow:
+1) Use `remark add --draft ...` to seed a comment (or edit the draft directly).
+2) Run **Tasks: Run Task** → `remark: open draft`.
+3) Edit and save; `remark` will sync draft changes on the next command or prompt.
+
 ## Keybindings
 
 ### Global / browse mode

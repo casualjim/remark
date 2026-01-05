@@ -1,28 +1,12 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use gix::Repository;
 
-pub fn run() -> Result<()> {
-    let repo = gix::discover(std::env::current_dir().context("get current directory")?)
-        .context("discover git repository")?;
-
-    // `remark purge --yes`
-    let mut confirm = false;
-    let args = std::env::args().skip(2);
-    for arg in args {
-        match arg.as_str() {
-            "--yes" | "-y" => confirm = true,
-            "-h" | "--help" => {
-                print_help_and_exit();
-            }
-            _ => {}
-        }
-    }
-
+pub fn run(repo: &Repository, confirm: bool) -> Result<()> {
     if !confirm {
-        print_help_and_exit();
+        anyhow::bail!("refusing to purge without --yes");
     }
 
-    let refs = collect_remark_refs(&repo)?;
+    let refs = collect_remark_refs(repo)?;
     if refs.is_empty() {
         println!("No remark notes refs found.");
         return Ok(());
@@ -37,10 +21,10 @@ pub fn run() -> Result<()> {
     }
 
     let mut reset_config = false;
-    let configured = crate::git::read_notes_ref(&repo);
+    let configured = crate::git::read_notes_ref(repo);
     if is_remark_ref_name(configured.as_bytes()) && configured != crate::git::DEFAULT_NOTES_REF {
         crate::git::write_local_config_value(
-            &repo,
+            repo,
             crate::git::CONFIG_NOTES_REF_KEY,
             crate::git::DEFAULT_NOTES_REF,
         )?;
@@ -78,11 +62,4 @@ fn is_remark_ref_name(name: &[u8]) -> bool {
         || name.starts_with(b"refs/notes/remark-")
         || name.starts_with(b"refs/notes/remark.")
         || name.starts_with(b"refs/notes/remark/")
-}
-
-fn print_help_and_exit() -> ! {
-    eprintln!(
-        "remark purge\n\nUSAGE:\n  remark purge --yes\n\nOPTIONS:\n  --yes, -y          Delete all remark notes refs (refs/notes/remark*)\n"
-    );
-    std::process::exit(2);
 }

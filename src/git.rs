@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::process::Command;
 
 use anyhow::{Context, Result};
 use gix::bstr::{BStr, ByteSlice};
@@ -7,8 +8,9 @@ use gix_dir::walk::EmissionMode;
 
 pub const DEFAULT_NOTES_REF: &str = "refs/notes/remark";
 pub const CONFIG_NOTES_REF_KEY: &str = "remark.notesRef";
+pub const CONFIG_NOTES_REMOTE_KEY: &str = "remark.notesRemote";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, clap::ValueEnum)]
 pub enum ViewKind {
     All,
     Unstaged,
@@ -60,6 +62,110 @@ pub fn read_notes_ref(repo: &Repository) -> String {
         .unwrap_or_else(|| DEFAULT_NOTES_REF.to_string())
 }
 
+pub fn ensure_notes_ref(repo: &Repository, notes_ref: &str) -> Result<()> {
+    if repo
+        .try_find_reference(notes_ref)
+        .context("find notes ref")?
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    let Some(remote) = select_notes_remote(repo)? else {
+        return Ok(());
+    };
+
+    fetch_notes_ref(repo, &remote, notes_ref)
+        .with_context(|| format!("fetch {notes_ref} from {remote}"))?;
+
+    Ok(())
+}
+
+fn select_notes_remote(repo: &Repository) -> Result<Option<String>> {
+    if let Some(remote) = read_local_config_value(repo, CONFIG_NOTES_REMOTE_KEY)
+        .ok()
+        .flatten()
+    {
+        return Ok(Some(remote));
+    }
+
+    if let Some(branch) = current_branch_name(repo)? {
+        let key = format!("branch.{branch}.remote");
+        if let Some(remote) = read_local_config_value(repo, &key).ok().flatten() {
+            return Ok(Some(remote));
+        }
+    }
+
+    let remotes = list_remotes(repo)?;
+    if remotes.is_empty() {
+        return Ok(None);
+    }
+    if remotes.iter().any(|r| r == "origin") {
+        return Ok(Some("origin".to_string()));
+    }
+    Ok(remotes.into_iter().next())
+}
+
+fn current_branch_name(repo: &Repository) -> Result<Option<String>> {
+    let Some(name) = repo.head_name().context("read HEAD name")? else {
+        return Ok(None);
+    };
+    let short = name.shorten();
+    Ok(short
+        .to_str()
+        .ok()
+        .map(|s| s.to_string())
+        .or_else(|| Some(short.to_str_lossy().to_string())))
+}
+
+fn list_remotes(repo: &Repository) -> Result<Vec<String>> {
+    let path = repo.git_dir().join("config");
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let config = gix::config::File::from_path_no_includes(path, gix::config::Source::Local)
+        .context("read local git config")?;
+    let mut remotes = Vec::new();
+    if let Some(sections) = config.sections_by_name("remote") {
+        for section in sections {
+            if let Some(name) = section.header().subsection_name() {
+                let remote = name
+                    .to_str()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|_| name.to_str_lossy().to_string());
+                remotes.push(remote);
+            }
+        }
+    }
+    remotes.sort();
+    remotes.dedup();
+    Ok(remotes)
+}
+
+fn fetch_notes_ref(repo: &Repository, remote: &str, notes_ref: &str) -> Result<()> {
+    let workdir = repo
+        .workdir()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| repo.git_dir().to_path_buf());
+
+    let refspec = format!("+{notes_ref}:{notes_ref}");
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(workdir)
+        .arg("fetch")
+        .arg("--no-tags")
+        .arg(remote)
+        .arg(refspec)
+        .status()
+        .context("spawn git fetch")?;
+
+    if !status.success() {
+        anyhow::bail!("git fetch failed");
+    }
+
+    Ok(())
+}
+
 pub fn write_local_config_value(repo: &Repository, key: &str, value: &str) -> Result<()> {
     let path = repo.git_dir().join("config");
     let mut config = if path.exists() {
@@ -95,6 +201,22 @@ fn split_config_key(key: &str) -> Result<(&str, &str)> {
 
 pub fn head_commit_oid(repo: &Repository) -> Result<ObjectId> {
     Ok(repo.head_commit().context("read HEAD commit")?.id)
+}
+
+pub fn normalize_repo_path(repo: &Repository, path: &str) -> String {
+    let mut out = path.to_string();
+    if let Some(stripped) = out.strip_prefix("./") {
+        out = stripped.to_string();
+    }
+    if let Some(wd) = repo.workdir() {
+        let p = std::path::Path::new(&out);
+        if p.is_absolute()
+            && let Ok(rel) = p.strip_prefix(wd)
+        {
+            out = rel.to_string_lossy().to_string();
+        }
+    }
+    out
 }
 
 pub fn note_file_key_oid(
