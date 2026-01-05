@@ -192,9 +192,17 @@ language-servers = [
 ```
 
 Workflow:
-1) Use the remark code action on a line or file header to seed a comment.
+1) Use the remark code action (space+a) on a line or file header to seed a comment.
 2) Press `Alt-h` / `Alt-v` to open the draft.
 3) Edit and save; the LSP syncs draft changes back into notes.
+
+Viewing comments:
+
+To view a single comment in the editor you can move to the start of the line and the inlay
+hint will be shown. You can also use the hover action (space + k) to show the message diagnostics.
+
+To view all the comments for a file you can just view the diagnostics (space + d). That should list all the
+LSP diagnostics and so you can review comments that way too.
 
 ## Zed integration
 
