@@ -7,6 +7,8 @@ pub struct Comment {
     pub body: String,
     #[serde(default)]
     pub resolved: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snippet_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
@@ -106,6 +108,7 @@ impl Review {
             f.file_comment = Some(Comment {
                 body: comment,
                 resolved,
+                snippet_hash: None,
             });
         }
         if f.file_comment.is_none() && f.comments.is_empty() && !f.reviewed {
@@ -154,16 +157,40 @@ impl Review {
                 line: line_1_based,
             };
             let resolved = f.comments.get(&key).map(|c| c.resolved).unwrap_or(false);
+            let snippet_hash = f
+                .comments
+                .get(&key)
+                .and_then(|c| c.snippet_hash.clone());
             f.comments.insert(
                 key,
                 Comment {
                     body: comment,
                     resolved,
+                    snippet_hash,
                 },
             );
         }
         if f.file_comment.is_none() && f.comments.is_empty() && !f.reviewed {
             self.files.remove(path);
+        }
+    }
+
+    pub fn set_line_comment_snippet_hash(
+        &mut self,
+        path: &str,
+        side: LineSide,
+        line_1_based: u32,
+        hash: Option<String>,
+    ) {
+        let Some(f) = self.files.get_mut(path) else {
+            return;
+        };
+        let key = LineKey {
+            side,
+            line: line_1_based,
+        };
+        if let Some(comment) = f.comments.get_mut(&key) {
+            comment.snippet_hash = hash;
         }
     }
 
@@ -315,6 +342,7 @@ pub fn decode_file_note(note: &str) -> Option<FileReview> {
                 file_comment: v1.file.file_comment.map(|body| Comment {
                     body,
                     resolved: false,
+                    snippet_hash: None,
                 }),
                 comments: v1
                     .file
@@ -326,6 +354,7 @@ pub fn decode_file_note(note: &str) -> Option<FileReview> {
                             Comment {
                                 body,
                                 resolved: false,
+                                snippet_hash: None,
                             },
                         )
                     })
@@ -462,6 +491,7 @@ mod tests {
             file_comment: Some(Comment {
                 body: "file-level".to_string(),
                 resolved: true,
+                snippet_hash: None,
             }),
             reviewed: true,
             reviewed_hash: Some("abc123".to_string()),
@@ -475,6 +505,7 @@ mod tests {
             Comment {
                 body: "hello".to_string(),
                 resolved: false,
+                snippet_hash: None,
             },
         );
         fr.comments.insert(
@@ -485,6 +516,7 @@ mod tests {
             Comment {
                 body: "restore this".to_string(),
                 resolved: true,
+                snippet_hash: None,
             },
         );
 

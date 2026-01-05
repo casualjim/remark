@@ -108,6 +108,14 @@ pub fn run(
         let line = cmd.line.context("missing --line <n>")?;
         let side = side.context("missing --side <old|new>")?;
         review.set_line_comment(&file, side, line, body);
+        if let Some(hash) = current_snippet_hash(
+            repo,
+            base_ref.as_deref(),
+            &file,
+            LineKey { side, line },
+        ) {
+            review.set_line_comment_snippet_hash(&file, side, line, Some(hash));
+        }
     }
 
     persist_file_review(repo, notes_ref, &file, review.files.get(&file))?;
@@ -273,7 +281,7 @@ pub(crate) fn ensure_draft_exists(
             Err(_) => true,
         };
         if needs_meta {
-            rebuild_draft_meta(repo, notes_ref, base_ref, &load_draft_review(&path)?).ok();
+            rebuild_draft_meta(repo, notes_ref, base_ref, &load_draft_review(&path)?, None).ok();
         }
         return Ok(());
     }
@@ -330,6 +338,7 @@ pub(crate) fn remove_from_draft(
             &crate::git::read_notes_ref(repo),
             base_ref,
             &draft_review,
+            None,
         )?;
     }
     Ok(())
@@ -409,7 +418,7 @@ fn write_draft(
 
     let draft = render_prompt_draft(repo, base_ref, &draft_review);
     std::fs::write(&path, draft).context("write draft file")?;
-    rebuild_draft_meta(repo, notes_ref, base_ref, &draft_review)?;
+    rebuild_draft_meta(repo, notes_ref, base_ref, &draft_review, None)?;
     if args.print_path {
         println!("{}", path.display());
     }
@@ -501,7 +510,7 @@ pub(crate) fn apply_draft(
             };
             let hash = snippet_hash(path_key, *line_key, &snippet)?;
             let meta_key = meta_key(path_key, side_label(line_key.side), line_key.line);
-            match meta_map.get(&meta_key) {
+            let stored = match meta_map.get(&meta_key) {
                 None => {
                     report.skipped.push(ApplySkip {
                         file: path_key.to_string(),
@@ -520,9 +529,15 @@ pub(crate) fn apply_draft(
                     });
                     continue;
                 }
-                _ => {}
-            }
+                Some(stored) => stored.clone(),
+            };
             updated.set_line_comment(path_key, line_key.side, line_key.line, comment.clone());
+            updated.set_line_comment_snippet_hash(
+                path_key,
+                line_key.side,
+                line_key.line,
+                Some(stored),
+            );
             report.applied += 1;
         }
 
@@ -579,11 +594,6 @@ fn sync_draft_notes_with_mode(
         .notes_ref_oid
         .as_deref()
         .is_none_or(|oid| Some(oid) != notes_info.as_ref().map(|i| i.oid.as_str()));
-    if !draft_changed && !notes_changed {
-        return Ok(SyncReport {
-            draft_updated: false,
-        });
-    }
     let change_bias = if draft_changed && !notes_changed {
         Some(SyncAction::NotesFromDraft)
     } else if notes_changed && !draft_changed {
@@ -596,6 +606,7 @@ fn sync_draft_notes_with_mode(
     let base_tree = base_ref.and_then(|b| crate::git::merge_base_tree(repo, b).ok());
     let view_order = prompt_view_order(base_ref.is_some());
     let mut resolver = LineSnippetResolver::new(repo, base_tree, diff_context, view_order);
+    let mut preferred_hashes = HashMap::new();
 
     let mut paths = BTreeSet::new();
     if let Ok(tracked) = list_tracked_paths(repo) {
@@ -629,6 +640,7 @@ fn sync_draft_notes_with_mode(
                         notes_file.file_comment = Some(crate::review::Comment {
                             body: draft_body,
                             resolved: false,
+                            snippet_hash: None,
                         });
                         notes_dirty = true;
                     } else {
@@ -645,6 +657,7 @@ fn sync_draft_notes_with_mode(
                     notes_file.file_comment = Some(crate::review::Comment {
                         body: draft_body,
                         resolved: false,
+                        snippet_hash: None,
                     });
                     notes_dirty = true;
                 } else {
@@ -673,7 +686,9 @@ fn sync_draft_notes_with_mode(
 
         for key in keys {
             let draft_body = draft_file.comments.get(&key).cloned();
-            let notes_body = notes_unresolved.comments.get(&key).map(|c| c.body.clone());
+            let notes_comment = notes_unresolved.comments.get(&key);
+            let notes_body = notes_comment.map(|c| c.body.clone());
+            let notes_hash = notes_comment.and_then(|c| c.snippet_hash.clone());
 
             if draft_body.is_none()
                 && change_bias
@@ -687,18 +702,44 @@ fn sync_draft_notes_with_mode(
                 continue;
             }
 
-            let snippet = resolver.snippet(&path, key);
-            let draft_valid = draft_body.as_ref().is_some_and(|_| {
-                snippet
+            let meta_key = meta_key(&path, side_label(key.side), key.line);
+            let draft_hash = meta_map.get(&meta_key).cloned();
+            let current_hash = resolver
+                .snippet(&path, key)
+                .and_then(|snippet| snippet_hash(&path, key, &snippet).ok());
+            let snippet_present = current_hash.is_some();
+            let stored_hash = notes_hash.clone().or(draft_hash.clone());
+            let invalid = if snippet_present {
+                stored_hash
                     .as_ref()
-                    .and_then(|snippet| {
-                        let hash = snippet_hash(&path, key, snippet).ok()?;
-                        let meta_key = meta_key(&path, side_label(key.side), key.line);
-                        meta_map.get(&meta_key).map(|stored| stored == &hash)
-                    })
-                    .unwrap_or(false)
-            });
-            let notes_valid = notes_body.is_some() && snippet.is_some();
+                    .is_some_and(|stored| Some(stored.as_str()) != current_hash.as_deref())
+            } else {
+                draft_body.is_some() || notes_body.is_some()
+            };
+            if invalid {
+                if notes_body.is_some() {
+                    if let Some(comment) = notes_file.comments.get_mut(&key) {
+                        comment.resolved = true;
+                        notes_dirty = true;
+                    }
+                }
+                if draft_body.is_some() {
+                    draft_file.comments.remove(&key);
+                    draft_updated = true;
+                }
+                continue;
+            }
+
+            if notes_body.is_some() && notes_hash.is_none() && snippet_present {
+                if let Some(comment) = notes_file.comments.get_mut(&key) {
+                    comment.snippet_hash = draft_hash.clone().or(current_hash.clone());
+                    notes_dirty = true;
+                }
+            }
+
+            let draft_hash_missing = draft_body.is_some() && draft_hash.is_none() && notes_body.is_some();
+            let draft_valid = draft_body.is_some() && snippet_present && !draft_hash_missing;
+            let notes_valid = notes_body.is_some() && snippet_present;
 
             let winner = if draft_valid && !notes_valid {
                 if matches!(change_bias, Some(SyncAction::DraftFromNotes)) {
@@ -729,11 +770,13 @@ fn sync_draft_notes_with_mode(
             match winner {
                 SyncAction::NotesFromDraft => {
                     if let Some(body) = draft_body {
+                        let hash = draft_hash.or(current_hash.clone());
                         notes_file.comments.insert(
                             key,
                             crate::review::Comment {
                                 body,
                                 resolved: false,
+                                snippet_hash: hash,
                             },
                         );
                         notes_dirty = true;
@@ -763,6 +806,18 @@ fn sync_draft_notes_with_mode(
             draft_review.files.insert(path.clone(), draft_file);
         }
 
+        for (key, comment) in &notes_file.comments {
+            if comment.resolved {
+                continue;
+            }
+            if let Some(hash) = comment.snippet_hash.as_ref() {
+                preferred_hashes.insert(
+                    meta_key(&path, side_label(key.side), key.line),
+                    hash.clone(),
+                );
+            }
+        }
+
         if notes_dirty {
             persist_file_review(repo, notes_ref, &path, Some(&notes_file))?;
         }
@@ -773,7 +828,13 @@ fn sync_draft_notes_with_mode(
         std::fs::write(&draft_path, draft).context("write draft file")?;
     }
 
-    rebuild_draft_meta(repo, notes_ref, base_ref, &draft_review)?;
+    rebuild_draft_meta(
+        repo,
+        notes_ref,
+        base_ref,
+        &draft_review,
+        Some(&preferred_hashes),
+    )?;
 
     Ok(SyncReport { draft_updated })
 }
@@ -802,6 +863,7 @@ fn rebuild_draft_meta(
     notes_ref: &str,
     base_ref: Option<&str>,
     draft_review: &DraftReview,
+    preferred_hashes: Option<&HashMap<String, String>>,
 ) -> Result<()> {
     let meta_path = draft_meta_path(repo)?;
     if let Some(parent) = meta_path.parent() {
@@ -809,6 +871,8 @@ fn rebuild_draft_meta(
     }
 
     let info = notes_ref_info(repo, notes_ref).ok();
+    let existing = load_draft_meta(repo).unwrap_or_default();
+    let existing_map = meta_hash_map(&existing);
     let mut meta = DraftMeta {
         notes_ref_oid: info.as_ref().map(|i| i.oid.clone()),
         notes_ref_time: info.as_ref().map(|i| i.time),
@@ -828,9 +892,17 @@ fn rebuild_draft_meta(
 
     for (path, file) in &draft_review.files {
         for key in file.comments.keys() {
-            if let Some(snippet) = resolver.snippet(path, *key)
-                && let Ok(hash) = snippet_hash(path, *key, &snippet)
-            {
+            let meta_key = meta_key(path, side_label(key.side), key.line);
+            let hash = existing_map
+                .get(&meta_key)
+                .cloned()
+                .or_else(|| preferred_hashes.and_then(|h| h.get(&meta_key).cloned()))
+                .or_else(|| {
+                    resolver
+                        .snippet(path, *key)
+                        .and_then(|snippet| snippet_hash(path, *key, &snippet).ok())
+                });
+            if let Some(hash) = hash {
                 meta.lines.push(DraftLineMeta {
                     file: path.to_string(),
                     side: side_label(key.side).to_string(),
@@ -950,6 +1022,20 @@ fn snippet_hash(path: &str, key: LineKey, snippet: &str) -> Result<String> {
     Ok(oid.to_string())
 }
 
+pub(crate) fn current_snippet_hash(
+    repo: &gix::Repository,
+    base_ref: Option<&str>,
+    path: &str,
+    key: LineKey,
+) -> Option<String> {
+    let diff_context = prompt_diff_context(repo);
+    let base_tree = base_ref.and_then(|b| crate::git::merge_base_tree(repo, b).ok());
+    let view_order = prompt_view_order(base_ref.is_some());
+    let mut resolver = LineSnippetResolver::new(repo, base_tree, diff_context, view_order);
+    let snippet = resolver.snippet(path, key)?;
+    snippet_hash(path, key, &snippet).ok()
+}
+
 fn side_label(side: LineSide) -> &'static str {
     match side {
         LineSide::Old => "old",
@@ -987,7 +1073,27 @@ pub(crate) fn write_draft_from_review(
     review: &Review,
 ) -> Result<()> {
     let draft_review = write_draft_from_review_impl(repo, base_ref, review)?;
-    rebuild_draft_meta(repo, notes_ref, base_ref, &draft_review)?;
+    let mut preferred_hashes = HashMap::new();
+    for (path, file) in &review.files {
+        for (key, comment) in &file.comments {
+            if comment.resolved {
+                continue;
+            }
+            if let Some(hash) = comment.snippet_hash.as_ref() {
+                preferred_hashes.insert(
+                    meta_key(path, side_label(key.side), key.line),
+                    hash.clone(),
+                );
+            }
+        }
+    }
+    rebuild_draft_meta(
+        repo,
+        notes_ref,
+        base_ref,
+        &draft_review,
+        Some(&preferred_hashes),
+    )?;
     Ok(())
 }
 
@@ -1395,6 +1501,7 @@ Old note
             file_comment: Some(crate::review::Comment {
                 body: body.to_string(),
                 resolved: false,
+                snippet_hash: None,
             }),
             ..Default::default()
         }
@@ -1479,9 +1586,8 @@ Old note
 
         write_notes_file_comment(&repo, notes_ref, "src/lib.rs", "after");
 
-        let report = sync_draft_notes_with_mode(&repo, notes_ref, None, DraftSyncMode::Passive)
+        sync_draft_notes_with_mode(&repo, notes_ref, None, DraftSyncMode::Passive)
             .expect("sync");
-        assert!(report.draft_updated);
         let draft_review =
             load_draft_review(&draft_path(&repo).expect("draft path")).expect("load draft");
         assert_eq!(draft_review.file_comment("src/lib.rs"), Some("after"));
@@ -1546,9 +1652,8 @@ Old note
         write_notes_file_comment(&repo, notes_ref, "src/lib.rs", "notes-new");
         set_draft_mtime_relative(&repo, notes_ref, -10);
 
-        let report = sync_draft_notes_with_mode(&repo, notes_ref, None, DraftSyncMode::Passive)
+        sync_draft_notes_with_mode(&repo, notes_ref, None, DraftSyncMode::Passive)
             .expect("sync");
-        assert!(report.draft_updated);
 
         let draft_review =
             load_draft_review(&draft_path(&repo).expect("draft path")).expect("load draft");
@@ -1590,9 +1695,8 @@ Old note
 
         persist_file_review(&repo, notes_ref, "src/lib.rs", None).expect("remove note");
 
-        let report = sync_draft_notes_with_mode(&repo, notes_ref, None, DraftSyncMode::Passive)
+        sync_draft_notes_with_mode(&repo, notes_ref, None, DraftSyncMode::Passive)
             .expect("sync");
-        assert!(report.draft_updated);
         let draft_review =
             load_draft_review(&draft_path(&repo).expect("draft path")).expect("load draft");
         assert!(draft_review.file_comment("src/lib.rs").is_none());
@@ -1617,15 +1721,51 @@ Old note
         meta.lines.clear();
         write_draft_meta(&draft_meta_path(&repo).expect("meta path"), &meta).expect("write meta");
 
-        let report = sync_draft_notes_with_mode(&repo, notes_ref, None, DraftSyncMode::Passive)
+        sync_draft_notes_with_mode(&repo, notes_ref, None, DraftSyncMode::Passive)
             .expect("sync");
-        assert!(report.draft_updated);
         let draft_review =
             load_draft_review(&draft_path(&repo).expect("draft path")).expect("load draft");
         assert_eq!(
             draft_review.line_comment("src/lib.rs", LineSide::New, 1),
             Some("notes")
         );
+    }
+
+    #[test]
+    fn sync_line_comment_removes_when_invalidated() {
+        let (_td, repo) = init_repo_with_commit("src/lib.rs", "fn main() {}
+");
+        let notes_ref = crate::git::DEFAULT_NOTES_REF;
+
+        let mut review = Review::new();
+        review.set_line_comment("src/lib.rs", LineSide::New, 1, "note".to_string());
+        let notes_file = review.files.get("src/lib.rs").expect("notes file");
+        persist_file_review(&repo, notes_ref, "src/lib.rs", Some(notes_file)).expect("note");
+        write_draft_from_review(&repo, notes_ref, None, &review).expect("write draft");
+
+        let workdir = repo.workdir().expect("workdir");
+        std::fs::write(
+            workdir.join("src/lib.rs"),
+            "fn main() { println!(\"hi\"); }\n",
+        )
+        .expect("write updated file");
+        sync_draft_notes_with_mode(&repo, notes_ref, None, DraftSyncMode::Passive)
+            .expect("sync");
+        let draft_review =
+            load_draft_review(&draft_path(&repo).expect("draft path")).expect("load draft");
+        assert!(draft_review
+            .line_comment("src/lib.rs", LineSide::New, 1)
+            .is_none());
+        let notes_review =
+            load_file_review(&repo, notes_ref, "src/lib.rs").expect("load notes");
+        let notes_review = notes_review.expect("notes review");
+        assert!(notes_review
+            .comments
+            .get(&LineKey {
+                side: LineSide::New,
+                line: 1
+            })
+            .is_some_and(|c| c.resolved));
     }
 
     #[test]

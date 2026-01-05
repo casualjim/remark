@@ -2,6 +2,9 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use ignore::WalkBuilder;
+use ignore::overrides::OverrideBuilder;
+use notify::{RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tower_lsp::jsonrpc::Result as LspResult;
@@ -21,7 +24,8 @@ use crate::review::{Comment, FileReview, LineKey, LineSide};
 
 const COMMAND_RESOLVE: &str = "remark.resolve";
 const COMMAND_UNRESOLVE: &str = "remark.unresolve";
-const COMMAND_OPEN_DRAFT: &str = "remark.openDraft";
+const COMMAND_ADD_DRAFT_COMMENT: &str = "remark.addDraftComment";
+const COMMAND_OPEN_PROMPT: &str = "remark.openPrompt";
 
 pub fn run(
     repo_root: Option<PathBuf>,
@@ -68,6 +72,12 @@ struct Backend {
     enable_diagnostics: bool,
     show_document: std::sync::RwLock<Option<bool>>,
     open_documents: std::sync::RwLock<HashSet<Url>>,
+    fs_watcher: std::sync::Mutex<Option<notify::RecommendedWatcher>>,
+}
+
+enum FsWatchEvent {
+    Change,
+    Error(String),
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -108,6 +118,7 @@ impl Backend {
             enable_diagnostics,
             show_document: std::sync::RwLock::new(None),
             open_documents: std::sync::RwLock::new(HashSet::new()),
+            fs_watcher: std::sync::Mutex::new(None),
         }
     }
 
@@ -119,6 +130,112 @@ impl Backend {
             .and_then(|root| root.clone())
             .context("remark lsp has no workspace root")?;
         gix::open(&root).context("open repository")
+    }
+
+    fn start_fs_watcher(&self) {
+        let Some(root) = self.repo_root.read().ok().and_then(|root| root.clone()) else {
+            return;
+        };
+        let notes_ref = self.notes_ref.clone();
+        let base_ref = self.base_ref.clone();
+        let client = self.client.clone();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<FsWatchEvent>();
+        let watch_root = root.clone();
+        let watch_root_cb = watch_root.clone();
+        let sender = tx.clone();
+        let mut watcher =
+            match notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
+                Ok(event) => {
+                    if event
+                        .paths
+                        .iter()
+                        .any(|path| should_sync_path(&watch_root_cb, path))
+                    {
+                        let _ = sender.send(FsWatchEvent::Change);
+                    }
+                }
+                Err(err) => {
+                    let _ = sender.send(FsWatchEvent::Error(format!(
+                        "remark-lsp: file watch error: {err}"
+                    )));
+                }
+            }) {
+                Ok(watcher) => watcher,
+                Err(err) => {
+                    let client = self.client.clone();
+                    tokio::spawn(async move {
+                        client
+                            .log_message(
+                                MessageType::ERROR,
+                                format!("remark-lsp: failed to start file watcher: {err}"),
+                            )
+                            .await;
+                    });
+                    return;
+                }
+            };
+
+        if let Err(err) = watcher.watch(&watch_root, RecursiveMode::Recursive) {
+            let client = self.client.clone();
+            tokio::spawn(async move {
+                client
+                    .log_message(
+                        MessageType::ERROR,
+                        format!("remark-lsp: failed to watch workspace: {err}"),
+                    )
+                    .await;
+            });
+            return;
+        }
+
+        if let Ok(mut guard) = self.fs_watcher.lock() {
+            *guard = Some(watcher);
+        }
+
+        tokio::spawn(async move {
+            loop {
+                let Some(event) = rx.recv().await else {
+                    break;
+                };
+                match event {
+                    FsWatchEvent::Change => {}
+                    FsWatchEvent::Error(message) => {
+                        client.log_message(MessageType::WARNING, message).await;
+                        continue;
+                    }
+                }
+
+                loop {
+                    if let Err(err) = sync_once(&root, &notes_ref, base_ref.as_deref()) {
+                        client
+                            .log_message(
+                                MessageType::ERROR,
+                                format!("remark-lsp: watch sync failed: {err:#}"),
+                            )
+                            .await;
+                    }
+
+                    let mut pending = false;
+                    loop {
+                        match rx.try_recv() {
+                            Ok(FsWatchEvent::Change) => {
+                                pending = true;
+                            }
+                            Ok(FsWatchEvent::Error(message)) => {
+                                client.log_message(MessageType::WARNING, message).await;
+                            }
+                            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return,
+                        }
+                    }
+
+                    if !pending {
+                        break;
+                    }
+                }
+            }
+        });
     }
 
     fn to_repo_relative(&self, path: &Path) -> Option<String> {
@@ -322,8 +439,9 @@ impl Backend {
         let line = line_idx.saturating_add(1);
         let mut actions = Vec::new();
 
-        actions.push(make_draft_comment_action(&rel_path, line, LineSide::New));
-        actions.push(make_draft_file_comment_action(&rel_path));
+        actions.push(make_add_line_comment_action(&rel_path, line, LineSide::New));
+        actions.push(make_add_file_comment_action(&rel_path));
+        actions.push(make_open_prompt_action());
 
         if let Some(comment) = review.comments.get(&LineKey {
             side: LineSide::New,
@@ -405,7 +523,7 @@ impl Backend {
         }
     }
 
-    async fn open_draft(&self, args: DraftArgs) {
+    async fn add_draft_comment(&self, args: DraftArgs) {
         let DraftArgs {
             file,
             line,
@@ -449,6 +567,28 @@ impl Backend {
             self.log_error(err).await;
             return;
         }
+    }
+
+    async fn open_prompt(&self) {
+        let repo = match self.open_repo() {
+            Ok(repo) => repo,
+            Err(err) => {
+                self.log_error(err).await;
+                return;
+            }
+        };
+
+        if let Err(err) =
+            crate::add_cmd::ensure_draft_exists(&repo, &self.notes_ref, self.base_ref.as_deref())
+        {
+            self.log_error(err).await;
+            return;
+        }
+        if let Err(err) =
+            crate::add_cmd::sync_draft_notes(&repo, &self.notes_ref, self.base_ref.as_deref())
+        {
+            self.log_error(err).await;
+        }
 
         let path = match crate::add_cmd::draft_path(&repo) {
             Ok(path) => path,
@@ -457,15 +597,13 @@ impl Backend {
                 return;
             }
         };
-
-        let selection = line.map(|line| {
-            let line_idx = line.saturating_sub(1);
-            Range::new(Position::new(line_idx, 0), Position::new(line_idx, 0))
-        });
-
         let Ok(uri) = Url::from_file_path(path) else {
             return;
         };
+        self.show_document(uri, None).await;
+    }
+
+    async fn show_document(&self, uri: Url, selection: Option<Range>) {
         let params = ShowDocumentParams {
             uri,
             external: None,
@@ -550,6 +688,47 @@ fn line_end_utf16(path: &Path, line_idx: u32) -> Option<u32> {
     let content = std::fs::read_to_string(path).ok()?;
     let line = content.lines().nth(line_idx as usize)?;
     Some(line.encode_utf16().count() as u32)
+}
+
+fn sync_once(root: &Path, notes_ref: &str, base_ref: Option<&str>) -> Result<()> {
+    let repo = gix::open(root).context("open repository")?;
+    crate::add_cmd::sync_draft_notes(&repo, notes_ref, base_ref)?;
+    Ok(())
+}
+
+fn should_sync_path(root: &Path, path: &Path) -> bool {
+    if let (Ok(abs), Ok(root_abs)) = (std::fs::canonicalize(path), std::fs::canonicalize(root)) {
+        if !abs.starts_with(&root_abs) {
+            return false;
+        }
+    }
+
+    let mut overrides = OverrideBuilder::new(root);
+    let candidate = match path.strip_prefix(root) {
+        Ok(rel) => rel,
+        Err(_) => path,
+    };
+    if overrides.add(&candidate.to_string_lossy()).is_err() {
+        return false;
+    }
+    let overrides = match overrides.build() {
+        Ok(overrides) => overrides,
+        Err(_) => return false,
+    };
+
+    let mut builder = WalkBuilder::new(root);
+    builder.overrides(overrides);
+
+    for entry in builder.build().flatten() {
+        if entry.path() == path {
+            if let Some(ft) = entry.file_type() {
+                return ft.is_file();
+            }
+            return false;
+        }
+    }
+
+    false
 }
 
 fn inlay_label(comment: &Comment, side: Option<LineSide>) -> String {
@@ -653,8 +832,8 @@ fn make_file_comment_action(file: &str, resolved: bool) -> CodeActionOrCommand {
     })
 }
 
-fn make_draft_comment_action(file: &str, line: u32, side: LineSide) -> CodeActionOrCommand {
-    let title = format!("Remark: Open draft comment{}", format_side_label(side));
+fn make_add_line_comment_action(file: &str, line: u32, side: LineSide) -> CodeActionOrCommand {
+    let title = format!("Remark: Add line comment{}", format_side_label(side));
     let args = DraftArgs {
         file: file.to_string(),
         line: Some(line),
@@ -666,19 +845,19 @@ fn make_draft_comment_action(file: &str, line: u32, side: LineSide) -> CodeActio
     };
     let cmd = Command {
         title: title.clone(),
-        command: COMMAND_OPEN_DRAFT.to_string(),
+        command: COMMAND_ADD_DRAFT_COMMENT.to_string(),
         arguments: Some(vec![serde_json::to_value(args).unwrap_or(Value::Null)]),
     };
     CodeActionOrCommand::CodeAction(CodeAction {
         title,
-        kind: Some(CodeActionKind::REFACTOR),
+        kind: Some(CodeActionKind::QUICKFIX),
         command: Some(cmd),
         ..Default::default()
     })
 }
 
-fn make_draft_file_comment_action(file: &str) -> CodeActionOrCommand {
-    let title = "Remark: Open draft file comment".to_string();
+fn make_add_file_comment_action(file: &str) -> CodeActionOrCommand {
+    let title = "Remark: Add file comment".to_string();
     let args = DraftArgs {
         file: file.to_string(),
         line: None,
@@ -687,12 +866,27 @@ fn make_draft_file_comment_action(file: &str) -> CodeActionOrCommand {
     };
     let cmd = Command {
         title: title.clone(),
-        command: COMMAND_OPEN_DRAFT.to_string(),
+        command: COMMAND_ADD_DRAFT_COMMENT.to_string(),
         arguments: Some(vec![serde_json::to_value(args).unwrap_or(Value::Null)]),
     };
     CodeActionOrCommand::CodeAction(CodeAction {
         title,
-        kind: Some(CodeActionKind::REFACTOR),
+        kind: Some(CodeActionKind::QUICKFIX),
+        command: Some(cmd),
+        ..Default::default()
+    })
+}
+
+fn make_open_prompt_action() -> CodeActionOrCommand {
+    let title = "Remark: Open prompt".to_string();
+    let cmd = Command {
+        title: title.clone(),
+        command: COMMAND_OPEN_PROMPT.to_string(),
+        arguments: None,
+    };
+    CodeActionOrCommand::CodeAction(CodeAction {
+        title,
+        kind: Some(CodeActionKind::QUICKFIX),
         command: Some(cmd),
         ..Default::default()
     })
@@ -748,7 +942,8 @@ impl LanguageServer for Backend {
                     commands: vec![
                         COMMAND_RESOLVE.to_string(),
                         COMMAND_UNRESOLVE.to_string(),
-                        COMMAND_OPEN_DRAFT.to_string(),
+                        COMMAND_ADD_DRAFT_COMMENT.to_string(),
+                        COMMAND_OPEN_PROMPT.to_string(),
                     ],
                     work_done_progress_options: Default::default(),
                 }),
@@ -762,12 +957,13 @@ impl LanguageServer for Backend {
         self.client
             .log_message(MessageType::INFO, "remark-lsp initialized")
             .await;
+        self.start_fs_watcher();
         let repo_root = self.repo_root.read().ok().and_then(|root| root.clone());
         let notes_ref = self.notes_ref.clone();
         let base_ref = self.base_ref.clone();
         let client = self.client.clone();
         tokio::spawn(async move {
-            let result = tokio::task::spawn_blocking(move || -> Result<()> {
+            let result = (|| -> Result<()> {
                 let Some(root) = repo_root else {
                     return Ok(());
                 };
@@ -775,19 +971,10 @@ impl LanguageServer for Backend {
                 crate::add_cmd::ensure_draft_exists(&repo, &notes_ref, base_ref.as_deref())?;
                 crate::add_cmd::sync_draft_notes(&repo, &notes_ref, base_ref.as_deref())?;
                 Ok(())
-            })
-            .await;
+            })();
 
             match result {
                 Err(err) => {
-                    client
-                        .log_message(
-                            MessageType::ERROR,
-                            format!("remark-lsp: init sync failed: {err}"),
-                        )
-                        .await;
-                }
-                Ok(Err(err)) => {
                     client
                         .log_message(
                             MessageType::ERROR,
@@ -795,7 +982,7 @@ impl LanguageServer for Backend {
                         )
                         .await;
                 }
-                Ok(Ok(())) => {}
+                Ok(()) => {}
             }
         });
     }
@@ -874,7 +1061,7 @@ impl LanguageServer for Backend {
                 };
                 self.execute_remark_command(&params.command, args).await;
             }
-            COMMAND_OPEN_DRAFT => {
+            COMMAND_ADD_DRAFT_COMMENT => {
                 let Some(args) = params
                     .arguments
                     .into_iter()
@@ -883,7 +1070,10 @@ impl LanguageServer for Backend {
                 else {
                     return Ok(None);
                 };
-                self.open_draft(args).await;
+                self.add_draft_comment(args).await;
+            }
+            COMMAND_OPEN_PROMPT => {
+                self.open_prompt().await;
             }
             _ => {}
         }
@@ -1027,6 +1217,7 @@ mod tests {
         Comment {
             body: body.to_string(),
             resolved,
+            snippet_hash: None,
         }
     }
 
@@ -1587,7 +1778,7 @@ mod tests {
                 action
                     .get("title")
                     .and_then(|title| title.as_str())
-                    .is_some_and(|title| title == "Remark: Open draft comment")
+                    .is_some_and(|title| title == "Remark: Add line comment")
             })
             .expect("draft line action");
         let draft_file_action = actions
@@ -1596,16 +1787,29 @@ mod tests {
                 action
                     .get("title")
                     .and_then(|title| title.as_str())
-                    .is_some_and(|title| title == "Remark: Open draft file comment")
+                    .is_some_and(|title| title == "Remark: Add file comment")
             })
             .expect("draft file action");
+        let open_prompt_action = actions
+            .iter()
+            .find(|action| {
+                action
+                    .get("title")
+                    .and_then(|title| title.as_str())
+                    .is_some_and(|title| title == "Remark: Open prompt")
+            })
+            .expect("open prompt action");
         assert_eq!(
             draft_line_action.get("kind").and_then(|k| k.as_str()),
-            Some("refactor")
+            Some("quickfix")
         );
         assert_eq!(
             draft_file_action.get("kind").and_then(|k| k.as_str()),
-            Some("refactor")
+            Some("quickfix")
+        );
+        assert_eq!(
+            open_prompt_action.get("kind").and_then(|k| k.as_str()),
+            Some("quickfix")
         );
         let resolve_action = actions
             .iter()
