@@ -1,3 +1,18 @@
+## [0.2.2] - 2026-01-05
+
+### 🐛 Bug Fixes
+
+- Restore draft actions and diff scroll
+
+### 🧪 Testing
+
+- Cover diff wrapping regression
+## [0.2.1] - 2026-01-05
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.2.1 [ci skip]
+- Release remark version 0.2.1
 ## [0.2.0] - 2026-01-05
 
 ### 🚀 Features
