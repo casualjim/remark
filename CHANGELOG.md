@@ -1,3 +1,28 @@
+## [0.1.16] - 2026-01-05
+
+### 🚀 Features
+
+- Add draft workflow for helix
+- Improve draft sync and editor integration
+
+### 🚜 Refactor
+
+- Move cli parsing to clap/confique and add notes auto-fetch
+
+### 📚 Documentation
+
+- Adjust helix draft bindings
+- Improve helix integration instructions
+- Add vscode integration notes
+
+### 🧪 Testing
+
+- Add lsp integration coverage
+- Set git identity for repo init
+
+### ⚙️ Miscellaneous Tasks
+
+- Improve visible hints for lsp
 ## [0.1.15] - 2026-01-03
 
 ### 🚀 Features
@@ -11,6 +36,8 @@
 ### ⚙️ Miscellaneous Tasks
 
 - Fmt
+- Update changelog for v0.1.15 [ci skip]
+- Release remark version 0.1.15
 ## [0.1.14] - 2026-01-02
 
 ### 🚀 Features
