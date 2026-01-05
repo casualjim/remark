@@ -675,7 +675,7 @@ fn make_draft_comment_action(file: &str, line: u32, side: LineSide) -> CodeActio
     };
     CodeActionOrCommand::CodeAction(CodeAction {
         title,
-        kind: Some(CodeActionKind::QUICKFIX),
+        kind: Some(CodeActionKind::REFACTOR),
         command: Some(cmd),
         ..Default::default()
     })
@@ -696,7 +696,7 @@ fn make_draft_file_comment_action(file: &str) -> CodeActionOrCommand {
     };
     CodeActionOrCommand::CodeAction(CodeAction {
         title,
-        kind: Some(CodeActionKind::QUICKFIX),
+        kind: Some(CodeActionKind::REFACTOR),
         command: Some(cmd),
         ..Default::default()
     })
@@ -740,7 +740,10 @@ impl LanguageServer for Backend {
                 }),
                 code_action_provider: Some(CodeActionProviderCapability::Options(
                     CodeActionOptions {
-                        code_action_kinds: Some(vec![CodeActionKind::QUICKFIX]),
+                        code_action_kinds: Some(vec![
+                            CodeActionKind::QUICKFIX,
+                            CodeActionKind::REFACTOR,
+                        ]),
                         work_done_progress_options: Default::default(),
                         resolve_provider: Some(false),
                     },
@@ -1582,6 +1585,32 @@ mod tests {
         let actions_msg =
             wait_for_message(&mut client_read, |msg| msg.get("id") == Some(&4.into())).await;
         let actions = actions_msg["result"].as_array().expect("actions array");
+        let draft_line_action = actions
+            .iter()
+            .find(|action| {
+                action
+                    .get("title")
+                    .and_then(|title| title.as_str())
+                    .is_some_and(|title| title == "Remark: Open draft comment")
+            })
+            .expect("draft line action");
+        let draft_file_action = actions
+            .iter()
+            .find(|action| {
+                action
+                    .get("title")
+                    .and_then(|title| title.as_str())
+                    .is_some_and(|title| title == "Remark: Open draft file comment")
+            })
+            .expect("draft file action");
+        assert_eq!(
+            draft_line_action.get("kind").and_then(|k| k.as_str()),
+            Some("refactor")
+        );
+        assert_eq!(
+            draft_file_action.get("kind").and_then(|k| k.as_str()),
+            Some("refactor")
+        );
         let resolve_action = actions
             .iter()
             .find(|action| {

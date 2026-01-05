@@ -13,6 +13,7 @@ use crate::review::{LineKey, LineSide, PromptSnippet, Review};
 
 const DRAFT_DIR: &str = "remark";
 const DRAFT_FILENAME: &str = "draft.md";
+const DRAFT_PLACEHOLDER: &str = "<!-- remark:write comment -->";
 // Drafts are stored as prompt-formatted markdown in `.git/remark/draft.md`.
 
 pub fn run(
@@ -390,6 +391,12 @@ fn write_draft(
                 })
             })
             .unwrap_or_default()
+    };
+
+    let current_body = if current_body.trim().is_empty() {
+        DRAFT_PLACEHOLDER.to_string()
+    } else {
+        current_body
     };
 
     if args.file_comment {
@@ -1062,6 +1069,12 @@ fn parse_prompt_draft(content: &str) -> Result<DraftReview> {
             if trimmed == fence.as_str() {
                 if let Some(target) = pending_target.take() {
                     let text = body.join("\n").trim_end().to_string();
+                    let trimmed = text.trim();
+                    if trimmed.is_empty() || trimmed == DRAFT_PLACEHOLDER {
+                        body.clear();
+                        text_fence = None;
+                        continue;
+                    }
                     match target {
                         DraftTarget::File(path) => review.set_file_comment(&path, text),
                         DraftTarget::Line(path, line, side) => {
@@ -1251,6 +1264,51 @@ Old note
             draft.line_comment("src/lib.rs", LineSide::Old, 7),
             Some("Old note")
         );
+    }
+
+    #[test]
+    fn parse_prompt_draft_ignores_placeholder() {
+        let content = r#"# Review Notes
+
+## src/lib.rs
+### File comment
+```text
+<!-- remark:write comment -->
+```
+
+### Line comments
+- line 3
+```text
+<!-- remark:write comment -->
+```
+"#;
+
+        let draft = parse_prompt_draft(content).unwrap();
+        assert!(draft.file_comment("src/lib.rs").is_none());
+        assert!(draft.line_comment("src/lib.rs", LineSide::New, 3).is_none());
+    }
+
+    #[test]
+    fn write_draft_inserts_placeholder_for_empty_comment() {
+        let (_td, repo) = init_repo_with_commit("src/lib.rs", "fn main() {}\n");
+        write_draft(
+            &repo,
+            crate::git::DEFAULT_NOTES_REF,
+            None,
+            DraftWriteArgs {
+                file: "src/lib.rs",
+                file_comment: true,
+                line: None,
+                side: None,
+                print_path: false,
+            },
+        )
+        .expect("write draft");
+
+        let draft_path = draft_path(&repo).expect("draft path");
+        let content = std::fs::read_to_string(draft_path).expect("read draft");
+        assert!(content.contains(DRAFT_PLACEHOLDER));
+        assert!(content.contains("### File comment"));
     }
 
     fn init_repo_with_commit(path: &str, contents: &str) -> (tempfile::TempDir, gix::Repository) {

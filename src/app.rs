@@ -1786,7 +1786,8 @@ impl App {
                 RenderRow::FileHeader { path } => {
                     let old_s = " ".repeat(old_w);
                     let new_s = " ".repeat(new_w);
-                    format!("  {old_s} {new_s} │ {path}")
+                    // Marker is fixed-width (2 cells), plus two spaces before line numbers.
+                    format!("    {old_s} {new_s} │ {path}")
                 }
                 RenderRow::Section { text } => {
                     // We render section lines padded to fit, so they never wrap.
@@ -1819,7 +1820,8 @@ impl App {
                         .iter()
                         .map(|s| s.content.as_ref())
                         .collect::<String>();
-                    format!(" {diff_prefix} {old_s} {new_s} │ {code}")
+                    // Marker is fixed-width (2 cells).
+                    format!("  {diff_prefix} {old_s} {new_s} │ {code}")
                 }
             };
 
@@ -2608,6 +2610,72 @@ fn word_wrap_line_count(s: &str, width: u16) -> usize {
     }
 
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_app(repo: gix::Repository) -> App {
+        App {
+            repo,
+            notes_ref: crate::git::DEFAULT_NOTES_REF.to_string(),
+            base_ref: None,
+            show_ignored: false,
+            jump_target: None,
+            view: ViewKind::All,
+            focus: Focus::Files,
+            mode: Mode::Browse,
+            diff_view_mode: DiffViewMode::Unified,
+            diff_context: DEFAULT_DIFF_CONTEXT,
+            head_commit_oid: None,
+            review: Review::new(),
+            files: Vec::new(),
+            file_tree: FileTreeView::default(),
+            file_selected: 0,
+            file_scroll: 0,
+            files_viewport_height: 1,
+            manual_scroll: false,
+            diff_rows: Vec::new(),
+            diff_cursor: 0,
+            diff_scroll: 0,
+            diff_viewport_height: 1,
+            diff_viewport_width: 1,
+            diff_row_offsets: Vec::new(),
+            diff_row_heights: Vec::new(),
+            diff_total_visual_lines: 0,
+            reviewed_files: HashSet::new(),
+            editor_target: None,
+            editor_buffer: crate::ui::empty_textarea(),
+            prompt_buffer: crate::ui::empty_textarea(),
+            status: String::new(),
+            show_help: false,
+            show_prompt: false,
+            comment_list: Vec::new(),
+            comment_list_selected: 0,
+            comment_list_marked: HashSet::new(),
+            highlighter: Highlighter::new().expect("highlighter"),
+        }
+    }
+
+    #[test]
+    fn diff_metrics_account_for_marker_width() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let repo = gix::init(td.path()).expect("init repo");
+        let mut app = test_app(repo);
+        app.diff_rows.push(RenderRow::Unified(DiffRow {
+            kind: crate::diff::Kind::Context,
+            old_line: Some(1),
+            new_line: Some(1),
+            spans: vec![ratatui::text::Span::raw("x")],
+        }));
+
+        // This width is chosen so the marker width determines whether the row wraps.
+        app.recompute_diff_metrics(16);
+
+        assert_eq!(app.diff_row_heights, vec![2]);
+        assert_eq!(app.diff_total_visual_lines, 2);
+    }
 }
 
 fn review_fingerprint(before: Option<&str>, after: Option<&str>) -> Result<String> {
