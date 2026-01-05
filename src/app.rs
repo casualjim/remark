@@ -2612,6 +2612,32 @@ fn word_wrap_line_count(s: &str, width: u16) -> usize {
     lines
 }
 
+fn review_fingerprint(before: Option<&str>, after: Option<&str>) -> Result<String> {
+    let mut h = hasher(Kind::Sha1);
+    h.update(b"remark-review-v1\0");
+    hash_part(&mut h, b"before", before);
+    hash_part(&mut h, b"after", after);
+    let oid = h.try_finalize().context("finalize review hash")?;
+    Ok(oid.to_string())
+}
+
+fn hash_part(h: &mut gix_hash::Hasher, label: &[u8], value: Option<&str>) {
+    h.update(label);
+    h.update(b"\0");
+    match value {
+        Some(v) => {
+            h.update(b"1\0");
+            let len = v.len().to_string();
+            h.update(len.as_bytes());
+            h.update(b"\0");
+            h.update(v.as_bytes());
+        }
+        None => {
+            h.update(b"0\0");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2675,31 +2701,5 @@ mod tests {
 
         assert_eq!(app.diff_row_heights, vec![2]);
         assert_eq!(app.diff_total_visual_lines, 2);
-    }
-}
-
-fn review_fingerprint(before: Option<&str>, after: Option<&str>) -> Result<String> {
-    let mut h = hasher(Kind::Sha1);
-    h.update(b"remark-review-v1\0");
-    hash_part(&mut h, b"before", before);
-    hash_part(&mut h, b"after", after);
-    let oid = h.try_finalize().context("finalize review hash")?;
-    Ok(oid.to_string())
-}
-
-fn hash_part(h: &mut gix_hash::Hasher, label: &[u8], value: Option<&str>) {
-    h.update(label);
-    h.update(b"\0");
-    match value {
-        Some(v) => {
-            h.update(b"1\0");
-            let len = v.len().to_string();
-            h.update(len.as_bytes());
-            h.update(b"\0");
-            h.update(v.as_bytes());
-        }
-        None => {
-            h.update(b"0\0");
-        }
     }
 }
