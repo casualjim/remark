@@ -714,11 +714,11 @@ fn sync_draft_notes_with_mode(
                 draft_body.is_some() || notes_body.is_some()
             };
             if invalid {
-                if notes_body.is_some() {
-                    if let Some(comment) = notes_file.comments.get_mut(&key) {
-                        comment.resolved = true;
-                        notes_dirty = true;
-                    }
+                if notes_body.is_some()
+                    && let Some(comment) = notes_file.comments.get_mut(&key)
+                {
+                    comment.resolved = true;
+                    notes_dirty = true;
                 }
                 if draft_body.is_some() {
                     draft_file.comments.remove(&key);
@@ -727,11 +727,13 @@ fn sync_draft_notes_with_mode(
                 continue;
             }
 
-            if notes_body.is_some() && notes_hash.is_none() && snippet_present {
-                if let Some(comment) = notes_file.comments.get_mut(&key) {
-                    comment.snippet_hash = draft_hash.clone().or(current_hash.clone());
-                    notes_dirty = true;
-                }
+            if notes_body.is_some()
+                && notes_hash.is_none()
+                && snippet_present
+                && let Some(comment) = notes_file.comments.get_mut(&key)
+            {
+                comment.snippet_hash = draft_hash.clone().or(current_hash.clone());
+                notes_dirty = true;
             }
 
             let draft_hash_missing =
