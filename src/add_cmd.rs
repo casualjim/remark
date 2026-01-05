@@ -1199,6 +1199,7 @@ mod tests {
     use gix::bstr::ByteSlice;
     use gix::object::tree::EntryKind;
     use gix_ref::transaction::PreviousValue;
+    use std::sync::Once;
 
     #[test]
     fn review_to_draft_omits_resolved_and_empty() {
@@ -1253,6 +1254,7 @@ Old note
     }
 
     fn init_repo_with_commit(path: &str, contents: &str) -> (tempfile::TempDir, gix::Repository) {
+        ensure_git_identity();
         let td = tempfile::tempdir().expect("tempdir");
         let repo = gix::init(td.path()).expect("init repo");
 
@@ -1296,6 +1298,19 @@ Old note
             .expect("update HEAD");
 
         (td, repo)
+    }
+
+    fn ensure_git_identity() {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            // Safe in tests: single-threaded init, process-scoped env vars.
+            unsafe {
+                std::env::set_var("GIT_AUTHOR_NAME", "remark-test");
+                std::env::set_var("GIT_AUTHOR_EMAIL", "remark-test@localhost");
+                std::env::set_var("GIT_COMMITTER_NAME", "remark-test");
+                std::env::set_var("GIT_COMMITTER_EMAIL", "remark-test@localhost");
+            }
+        });
     }
 
     fn file_comment_review(body: &str) -> crate::review::FileReview {

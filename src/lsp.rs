@@ -1022,6 +1022,7 @@ fn extract_root_path(params: &InitializeParams) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::sync::Once;
 
     fn comment(body: &str, resolved: bool) -> Comment {
         Comment {
@@ -1170,6 +1171,7 @@ mod tests {
     }
 
     fn init_repo_with_commit(path: &str, contents: &str) -> (tempfile::TempDir, gix::Repository) {
+        ensure_git_identity();
         use gix::bstr::ByteSlice;
         use gix::object::tree::EntryKind;
         use gix_ref::transaction::PreviousValue;
@@ -1217,6 +1219,19 @@ mod tests {
             .expect("update HEAD");
 
         (td, repo)
+    }
+
+    fn ensure_git_identity() {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            // Safe in tests: single-threaded init, process-scoped env vars.
+            unsafe {
+                std::env::set_var("GIT_AUTHOR_NAME", "remark-test");
+                std::env::set_var("GIT_AUTHOR_EMAIL", "remark-test@localhost");
+                std::env::set_var("GIT_COMMITTER_NAME", "remark-test");
+                std::env::set_var("GIT_COMMITTER_EMAIL", "remark-test@localhost");
+            }
+        });
     }
 
     fn write_file_note(
