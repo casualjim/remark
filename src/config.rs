@@ -67,6 +67,7 @@ pub enum Command {
     Prompt(PromptCli),
     Resolve(ResolveCli),
     Add(AddCli),
+    Draft(DraftCli),
     New(NewCli),
     Purge(PurgeCli),
     Lsp(LspCli),
@@ -182,6 +183,9 @@ pub struct AddCli {
 }
 
 #[derive(Args, Debug, Clone, Default)]
+pub struct DraftCli {}
+
+#[derive(Args, Debug, Clone, Default)]
 pub struct NewCli {}
 
 #[derive(Args, Debug, Clone)]
@@ -196,6 +200,14 @@ pub struct LspCli {
     /// Include resolved comments in diagnostics/hover output.
     #[arg(long = "include-resolved", action = ArgAction::SetTrue)]
     pub include_resolved: bool,
+
+    /// Disable inlay hints output.
+    #[arg(long = "no-inlay-hints", action = ArgAction::SetTrue)]
+    pub no_inlay_hints: bool,
+
+    /// Disable diagnostics output.
+    #[arg(long = "no-diagnostics", action = ArgAction::SetTrue)]
+    pub no_diagnostics: bool,
 }
 
 pub fn load_config(global: &GlobalArgs, ui: &UiArgs) -> Result<AppConfig> {

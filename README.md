@@ -125,54 +125,80 @@ remark resolve --file src/lib.rs --line 10 --side old
 remark resolve --file src/lib.rs --line 42 --unresolve
 ```
 
-## Helix integration (draft workflow)
+## Helix integration (LSP workflow)
 
-Helix is great for **browsing** remarks via the LSP (diagnostics, hover, inlay hints),
-but it doesn't provide an inline prompt for entering new comments. The draft workflow
-keeps everything in the same Helix session:
+Helix supports the remark LSP code actions, so you can open draft comments directly
+from the editor without custom tasks. Use the code action on a line (or file header)
+to open a draft comment, edit `.git/remark/draft.md`, and save; the LSP will sync
+draft changes back into notes.
 
-1) Create/update a draft for the current file/line:
-```bash
-remark add --draft --file src/lib.rs --line 42
-```
-This writes `.git/remark/draft.md` with:
-- Metadata (file/line/side)
-- Optional diff context
-- A ` ```text ... ``` ` block for your comment body
-
-2) Open the draft in a split, edit the text block.
-
-3) Apply the draft:
+If the LSP isn't running, you can apply and clean up the draft manually:
 ```bash
 remark add --apply
 ```
-This persists the note and removes the draft file.
+
+## Zed integration
+
+Zed only starts custom language servers when they are registered by an extension.
+
+### Install the extension (users)
+
+Install `remark-lsp` from Zed's extensions UI.
+
+### Install the dev extension (maintainers)
+
+Use the dev extension while iterating locally:
+
+1) In Zed, open the command palette and choose **Extensions: Install Dev Extension**.
+2) Select the folder `zed-extension/remark-lsp` in this repo.
+
+### Configure languages
+
+Add `remark-lsp` to the languages you want, and keep defaults with `...`:
+
+```json
+{
+  "languages": {
+    "Rust": { "language_servers": ["remark-lsp", "..."] },
+    "Go": { "language_servers": ["remark-lsp", "..."] },
+    "TypeScript": { "language_servers": ["remark-lsp", "..."] },
+    "TSX": { "language_servers": ["remark-lsp", "..."] }
+  }
+}
+```
+
+The extension resolves the `remark` binary from your PATH, then runs `remark lsp`.
+If Zed can't find it, make sure `$HOME/.cargo/bin` is in the PATH Zed sees.
+You can pass extra LSP flags via `REMARK_LSP_ARGS`, for example:
+
+```bash
+REMARK_LSP_ARGS="--no-inlay-hints" zed
+```
+
+### Draft workflow (tasks)
+
+Zed doesn't yet support the LSP `showDocument` flow that remark uses to open the draft,
+so use a task to open `.git/remark/draft.md`. First, use the code action to mark a line
+or file for comment, then open the draft file via a task.
+
+Create a project-local tasks file at `.zed/tasks.json` (in the repo root):
+
+```json
+[
+  {
+    "label": "remark: open draft",
+    "command": "path=$(remark draft) && zed \"$path\"",
+    "cwd": "$ZED_WORKTREE_ROOT"
+  }
+]
+```
 
 Notes:
-- Line comments default to the **new** side when `--side` is omitted.
-- The draft file lives inside `.git`, so it won't show up in git status.
-- If your repo uses a separate git dir (worktrees), use `--print-path` to get the exact draft path.
+- Requires the `zed` CLI to be on your PATH.
+- The draft file is inside `.git`, so it won't show up in git status.
 
-### Suggested Helix keybindings
-
-Pick keys that don't conflict with your setup. Example using Alt-modified keys.
-These bindings assume Helix is started in the repo root (so `.git/…` resolves).
-Note: the split commands require the draft file to exist, so run the draft
-command once before opening it.
-
-```toml
-[keys.normal]
-A-r = ':run-shell-command remark add --draft --file %{buffer_name} --line %{cursor_line}'
-A-h = ':hsplit .git/remark/draft.md'
-A-v = ':vsplit .git/remark/draft.md'
-A-a = ':run-shell-command remark add --apply'
-```
-
-Optional file-level comment draft:
-```toml
-[keys.normal]
-A-f = ':run-shell-command remark add --draft --file %{buffer_name} --file-comment'
-```
+To run the task, open the command palette and use **task: spawn**, then pick the
+`remark: open draft ...` entry.
 
 ## Keybindings
 

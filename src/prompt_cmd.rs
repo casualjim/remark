@@ -1,9 +1,9 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::config::PromptFilter;
 use crate::git::ViewKind;
-use crate::prompt_code::LineCodeResolver;
-use crate::review::{FileReview, Review};
+use crate::prompt_code::{LineSnippetResolver, language_for_path};
+use crate::review::PromptSnippet;
 
 pub fn run(
     repo: &gix::Repository,
@@ -11,7 +11,7 @@ pub fn run(
     filter: PromptFilter,
     base_ref: Option<String>,
 ) -> Result<()> {
-    let head = crate::git::head_commit_oid(repo)?;
+    let head = crate::git::head_commit_oid(repo).ok();
 
     let mut paths = match filter {
         PromptFilter::All => {
@@ -32,52 +32,27 @@ pub fn run(
     paths.sort();
     paths.dedup();
 
-    let mut review = Review::new();
-    let mut views_to_scan = vec![ViewKind::All, ViewKind::Staged, ViewKind::Unstaged];
-    if base_ref.is_some() {
-        views_to_scan.push(ViewKind::Base);
+    if head.is_some() {
+        crate::add_cmd::sync_draft_notes(repo, notes_ref, base_ref.as_deref())?;
     }
 
-    for path in paths {
-        let mut merged: Option<FileReview> = None;
-        for view in &views_to_scan {
-            let base_for_key = match view {
-                ViewKind::Base => base_ref.as_deref(),
-                _ => None,
-            };
-            let oid = crate::git::note_file_key_oid(repo, head, *view, base_for_key, &path)
-                .with_context(|| format!("compute note key for '{path}'"))?;
-            let note = crate::notes::read(repo, notes_ref, &oid)
-                .with_context(|| format!("read note for '{path}'"))?;
-            let Some(note) = note.as_deref() else {
-                continue;
-            };
-            let Some(file) = crate::review::decode_file_note(note) else {
-                continue;
-            };
-            merged = Some(match merged {
-                None => file,
-                Some(mut existing) => {
-                    merge_file_review(&mut existing, file);
-                    existing
-                }
-            });
-        }
-        if let Some(file) = merged
-            && (file.file_comment.is_some() || !file.comments.is_empty())
-        {
-            review.files.insert(path, file);
-        }
-    }
+    let mut review = crate::add_cmd::load_review_from_draft(repo, notes_ref, base_ref.as_deref())?;
+    let path_set: std::collections::HashSet<_> = paths.iter().cloned().collect();
+    review.files.retain(|path, _| path_set.contains(path));
 
     let diff_context = prompt_diff_context(repo);
     let view_order = prompt_view_order(filter, base_ref.is_some());
     let base_tree = base_ref
         .as_deref()
         .and_then(|b| crate::git::merge_base_tree(repo, b).ok());
-    let mut resolver = LineCodeResolver::new(repo, base_tree, diff_context, view_order);
+    let mut resolver = LineSnippetResolver::new(repo, base_tree, diff_context, view_order);
 
-    let prompt = crate::review::render_prompt(&review, |path, key| resolver.line_code(path, key));
+    let prompt = crate::review::render_prompt(&review, |path, key| {
+        resolver.snippet(path, key).map(|code| PromptSnippet {
+            code,
+            lang: language_for_path(path),
+        })
+    });
     print!("{prompt}");
     if !prompt.ends_with('\n') {
         println!();
@@ -88,28 +63,6 @@ pub fn run(
 const DEFAULT_DIFF_CONTEXT: u32 = 3;
 const MIN_DIFF_CONTEXT: u32 = 0;
 const MAX_DIFF_CONTEXT: u32 = 20;
-
-fn merge_file_review(target: &mut FileReview, incoming: FileReview) {
-    match (&target.file_comment, &incoming.file_comment) {
-        (None, Some(_)) => target.file_comment = incoming.file_comment,
-        (Some(t), Some(i)) if t.resolved && !i.resolved => {
-            target.file_comment = incoming.file_comment
-        }
-        _ => {}
-    }
-
-    for (k, v) in incoming.comments {
-        match target.comments.get(&k) {
-            None => {
-                target.comments.insert(k, v);
-            }
-            Some(existing) if existing.resolved && !v.resolved => {
-                target.comments.insert(k, v);
-            }
-            _ => {}
-        }
-    }
-}
 
 fn prompt_view_order(filter: PromptFilter, include_base: bool) -> Vec<ViewKind> {
     let mut order = match filter {

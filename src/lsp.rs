@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -7,10 +8,10 @@ use tower_lsp::jsonrpc::Result as LspResult;
 use tower_lsp::lsp_types::{
     CodeAction, CodeActionKind, CodeActionOptions, CodeActionOrCommand, CodeActionParams,
     CodeActionProviderCapability, Command, Diagnostic, DiagnosticSeverity, ExecuteCommandOptions,
-    ExecuteCommandParams, Hover, HoverContents, InlayHint, InlayHintLabel,
-    InlayHintOptions, InlayHintParams, InlayHintServerCapabilities, InitializeParams,
-    InitializeResult, InitializedParams, MarkupContent, MarkupKind, MessageType, OneOf, Position,
-    Range, ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
+    ExecuteCommandParams, Hover, HoverContents, InitializeParams, InitializeResult,
+    InitializedParams, InlayHint, InlayHintLabel, InlayHintOptions, InlayHintParams,
+    InlayHintServerCapabilities, MarkupContent, MarkupKind, MessageType, OneOf, Position, Range,
+    ServerCapabilities, ShowDocumentParams, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
@@ -20,18 +21,17 @@ use crate::review::{Comment, FileReview, LineKey, LineSide};
 
 const COMMAND_RESOLVE: &str = "remark.resolve";
 const COMMAND_UNRESOLVE: &str = "remark.unresolve";
+const COMMAND_OPEN_DRAFT: &str = "remark.openDraft";
 
 pub fn run(
-    repo: gix::Repository,
+    repo_root: Option<PathBuf>,
     notes_ref: String,
     base_ref: Option<String>,
     cli: LspCli,
 ) -> Result<()> {
-    let repo_root = repo
-        .workdir()
-        .map(ToOwned::to_owned)
-        .context("remark lsp requires a working tree")?;
     let include_resolved = cli.include_resolved;
+    let enable_inlay_hints = !cli.no_inlay_hints;
+    let enable_diagnostics = !cli.no_diagnostics;
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -42,7 +42,15 @@ pub fn run(
         let stdin = tokio::io::stdin();
         let stdout = tokio::io::stdout();
         let (service, socket) = LspService::new(|client| {
-            Backend::new(client, repo_root, notes_ref, base_ref, include_resolved)
+            Backend::new(
+                client,
+                repo_root.clone(),
+                notes_ref,
+                base_ref,
+                include_resolved,
+                enable_inlay_hints,
+                enable_diagnostics,
+            )
         });
         Server::new(stdin, stdout, socket).serve(service).await;
     });
@@ -52,10 +60,14 @@ pub fn run(
 
 struct Backend {
     client: Client,
-    repo_root: PathBuf,
+    repo_root: std::sync::RwLock<Option<PathBuf>>,
     notes_ref: String,
     base_ref: Option<String>,
     include_resolved: bool,
+    enable_inlay_hints: bool,
+    enable_diagnostics: bool,
+    show_document: std::sync::RwLock<Option<bool>>,
+    open_documents: std::sync::RwLock<HashSet<Url>>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -67,33 +79,58 @@ struct ResolveArgs {
     file_comment: bool,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct DraftArgs {
+    file: String,
+    line: Option<u32>,
+    side: Option<String>,
+    #[serde(default)]
+    file_comment: bool,
+}
+
 impl Backend {
     fn new(
         client: Client,
-        repo_root: PathBuf,
+        repo_root: Option<PathBuf>,
         notes_ref: String,
         base_ref: Option<String>,
         include_resolved: bool,
+        enable_inlay_hints: bool,
+        enable_diagnostics: bool,
     ) -> Self {
         Self {
             client,
-            repo_root,
+            repo_root: std::sync::RwLock::new(repo_root),
             notes_ref,
             base_ref,
             include_resolved,
+            enable_inlay_hints,
+            enable_diagnostics,
+            show_document: std::sync::RwLock::new(None),
+            open_documents: std::sync::RwLock::new(HashSet::new()),
         }
     }
 
     fn open_repo(&self) -> Result<gix::Repository> {
-        gix::open(&self.repo_root).context("open repository")
+        let root = self
+            .repo_root
+            .read()
+            .ok()
+            .and_then(|root| root.clone())
+            .context("remark lsp has no workspace root")?;
+        gix::open(&root).context("open repository")
     }
 
     fn to_repo_relative(&self, path: &Path) -> Option<String> {
-        let rel = path.strip_prefix(&self.repo_root).ok()?;
+        let root = self.repo_root.read().ok().and_then(|root| root.clone())?;
+        let rel = path.strip_prefix(&root).ok()?;
         Some(rel.to_string_lossy().to_string())
     }
 
     async fn publish_diagnostics(&self, uri: &Url) {
+        if !self.enable_diagnostics {
+            return;
+        }
         let Ok(path) = uri.to_file_path() else {
             return;
         };
@@ -130,6 +167,24 @@ impl Backend {
         self.client
             .publish_diagnostics(uri.clone(), diagnostics, None)
             .await;
+    }
+
+    async fn refresh_open_diagnostics(&self, exclude: Option<&Url>) {
+        if !self.enable_diagnostics {
+            return;
+        }
+        let uris = self
+            .open_documents
+            .read()
+            .ok()
+            .map(|set| set.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for uri in uris {
+            if exclude.is_some_and(|excluded| excluded == &uri) {
+                continue;
+            }
+            self.publish_diagnostics(&uri).await;
+        }
     }
 
     async fn log_error(&self, err: anyhow::Error) {
@@ -226,7 +281,12 @@ impl Backend {
                 continue;
             }
             let character = line_end_utf16(&path, line_idx).unwrap_or(0);
-            hints.push(make_inlay_hint(line_idx, character, comment, Some(key.side)));
+            hints.push(make_inlay_hint(
+                line_idx,
+                character,
+                comment,
+                Some(key.side),
+            ));
         }
 
         hints
@@ -248,21 +308,24 @@ impl Backend {
         };
         let review =
             match load_file_review(&repo, &self.notes_ref, &rel_path, self.base_ref.as_deref()) {
-                Ok(review) => review,
+                Ok(review) => review.unwrap_or_default(),
                 Err(err) => {
                     self.log_error(err).await;
                     return Vec::new();
                 }
             };
-        let Some(mut review) = review else {
-            return Vec::new();
-        };
+        let mut review = review;
         if !self.include_resolved {
             prune_resolved(&mut review);
         }
 
         let line = line_idx.saturating_add(1);
         let mut actions = Vec::new();
+
+        actions.push(make_draft_comment_action(&rel_path, line, LineSide::New));
+        if line_idx == 0 {
+            actions.push(make_draft_file_comment_action(&rel_path));
+        }
 
         if let Some(comment) = review.comments.get(&LineKey {
             side: LineSide::New,
@@ -289,10 +352,7 @@ impl Backend {
         if line_idx == 0
             && let Some(comment) = review.file_comment.as_ref()
         {
-            actions.push(make_file_comment_action(
-                &rel_path,
-                comment.resolved,
-            ));
+            actions.push(make_file_comment_action(&rel_path, comment.resolved));
         }
 
         actions
@@ -325,16 +385,168 @@ impl Backend {
             file_comment: args.file_comment,
             unresolve,
         };
-        if let Err(err) = crate::resolve_cmd::run(&repo, &self.notes_ref, self.base_ref.clone(), cmd)
+        if let Err(err) =
+            crate::resolve_cmd::run(&repo, &self.notes_ref, self.base_ref.clone(), cmd)
         {
             self.log_error(err).await;
             return;
         }
 
-        let path = self.repo_root.join(&args.file);
-        if let Ok(uri) = Url::from_file_path(path) {
-            self.publish_diagnostics(&uri).await;
+        let root = self.repo_root.read().ok().and_then(|root| root.clone());
+        if let Some(root) = root {
+            let path = root.join(&args.file);
+            if let Ok(uri) = Url::from_file_path(path) {
+                self.publish_diagnostics(&uri).await;
+            }
         }
+
+        if matches!(command, COMMAND_RESOLVE)
+            && let Err(err) = self
+                .remove_from_draft(&args.file, args.line, side, args.file_comment)
+                .await
+        {
+            self.log_error(err).await;
+        }
+    }
+
+    async fn open_draft(&self, args: DraftArgs) {
+        let DraftArgs {
+            file,
+            line,
+            side: side_raw,
+            file_comment,
+        } = args;
+
+        let side = match side_raw.as_deref() {
+            Some("old") => Some(LineSide::Old),
+            Some("new") => Some(LineSide::New),
+            Some(other) => {
+                self.log_error(anyhow::anyhow!("invalid side '{other}'"))
+                    .await;
+                return;
+            }
+            None => None,
+        };
+
+        let repo = match self.open_repo() {
+            Ok(repo) => repo,
+            Err(err) => {
+                self.log_error(err).await;
+                return;
+            }
+        };
+
+        let cmd = crate::config::AddCli {
+            file: Some(file.clone()),
+            line,
+            side,
+            file_comment,
+            message: None,
+            edit: false,
+            editor: None,
+            draft: true,
+            apply: false,
+            print_path: false,
+        };
+
+        if let Err(err) = crate::add_cmd::run(&repo, &self.notes_ref, self.base_ref.clone(), cmd) {
+            self.log_error(err).await;
+            return;
+        }
+
+        let path = match crate::add_cmd::draft_path(&repo) {
+            Ok(path) => path,
+            Err(err) => {
+                self.log_error(err).await;
+                return;
+            }
+        };
+
+        let selection = line.map(|line| {
+            let line_idx = line.saturating_sub(1);
+            Range::new(Position::new(line_idx, 0), Position::new(line_idx, 0))
+        });
+
+        let Ok(uri) = Url::from_file_path(path) else {
+            return;
+        };
+        let params = ShowDocumentParams {
+            uri,
+            external: None,
+            take_focus: Some(true),
+            selection,
+        };
+        let allow_show = self.show_document.read().ok().and_then(|guard| *guard);
+        if allow_show == Some(false) {
+            self.client
+                .log_message(
+                    MessageType::INFO,
+                    "remark-lsp: client does not support window/showDocument",
+                )
+                .await;
+            return;
+        }
+        if let Err(err) = self.client.show_document(params).await {
+            self.client
+                .log_message(
+                    MessageType::WARNING,
+                    format!("remark-lsp: showDocument failed, disabling: {err}"),
+                )
+                .await;
+            if let Ok(mut guard) = self.show_document.write() {
+                *guard = Some(false);
+            }
+        }
+    }
+
+    async fn sync_draft_if_needed(&self, uri: &Url) -> bool {
+        let Ok(path) = uri.to_file_path() else {
+            return false;
+        };
+        let repo = match self.open_repo() {
+            Ok(repo) => repo,
+            Err(err) => {
+                self.log_error(err).await;
+                return false;
+            }
+        };
+        let draft_path = match crate::add_cmd::draft_path(&repo) {
+            Ok(path) => path,
+            Err(err) => {
+                self.log_error(err).await;
+                return false;
+            }
+        };
+        if path != draft_path {
+            return false;
+        }
+        if let Err(err) = crate::add_cmd::sync_draft_notes_on_save(
+            &repo,
+            &self.notes_ref,
+            self.base_ref.as_deref(),
+        ) {
+            self.log_error(err).await;
+        }
+        self.refresh_open_diagnostics(Some(uri)).await;
+        true
+    }
+
+    async fn remove_from_draft(
+        &self,
+        file: &str,
+        line: Option<u32>,
+        side: Option<LineSide>,
+        file_comment: bool,
+    ) -> Result<()> {
+        let repo = self.open_repo()?;
+        crate::add_cmd::remove_from_draft(
+            &repo,
+            self.base_ref.as_deref(),
+            file,
+            line,
+            side,
+            file_comment,
+        )
     }
 }
 
@@ -345,13 +557,7 @@ fn line_end_utf16(path: &Path, line_idx: u32) -> Option<u32> {
 }
 
 fn inlay_label(comment: &Comment, side: Option<LineSide>) -> String {
-    let mut snippet = comment
-        .body
-        .lines()
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_string();
+    let mut snippet = comment.body.lines().next().unwrap_or("").trim().to_string();
     const MAX_LEN: usize = 80;
     if snippet.len() > MAX_LEN {
         snippet.truncate(MAX_LEN);
@@ -451,6 +657,51 @@ fn make_file_comment_action(file: &str, resolved: bool) -> CodeActionOrCommand {
     })
 }
 
+fn make_draft_comment_action(file: &str, line: u32, side: LineSide) -> CodeActionOrCommand {
+    let title = format!("Remark: Open draft comment{}", format_side_label(side));
+    let args = DraftArgs {
+        file: file.to_string(),
+        line: Some(line),
+        side: Some(match side {
+            LineSide::Old => "old".to_string(),
+            LineSide::New => "new".to_string(),
+        }),
+        file_comment: false,
+    };
+    let cmd = Command {
+        title: title.clone(),
+        command: COMMAND_OPEN_DRAFT.to_string(),
+        arguments: Some(vec![serde_json::to_value(args).unwrap_or(Value::Null)]),
+    };
+    CodeActionOrCommand::CodeAction(CodeAction {
+        title,
+        kind: Some(CodeActionKind::QUICKFIX),
+        command: Some(cmd),
+        ..Default::default()
+    })
+}
+
+fn make_draft_file_comment_action(file: &str) -> CodeActionOrCommand {
+    let title = "Remark: Open draft file comment".to_string();
+    let args = DraftArgs {
+        file: file.to_string(),
+        line: None,
+        side: None,
+        file_comment: true,
+    };
+    let cmd = Command {
+        title: title.clone(),
+        command: COMMAND_OPEN_DRAFT.to_string(),
+        arguments: Some(vec![serde_json::to_value(args).unwrap_or(Value::Null)]),
+    };
+    CodeActionOrCommand::CodeAction(CodeAction {
+        title,
+        kind: Some(CodeActionKind::QUICKFIX),
+        command: Some(cmd),
+        ..Default::default()
+    })
+}
+
 fn format_side_label(side: LineSide) -> String {
     match side {
         LineSide::Old => " [old]".to_string(),
@@ -460,19 +711,33 @@ fn format_side_label(side: LineSide) -> String {
 
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
-    async fn initialize(&self, _: InitializeParams) -> LspResult<InitializeResult> {
+    async fn initialize(&self, params: InitializeParams) -> LspResult<InitializeResult> {
+        if let Some(root) = extract_root_path(&params)
+            && let Ok(mut guard) = self.repo_root.write()
+        {
+            *guard = Some(root);
+        }
+        let show_document = params
+            .capabilities
+            .window
+            .as_ref()
+            .and_then(|window| window.show_document.as_ref())
+            .map(|caps| caps.support);
+        if let Ok(mut guard) = self.show_document.write() {
+            *guard = show_document;
+        }
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::INCREMENTAL,
                 )),
                 hover_provider: Some(true.into()),
-                inlay_hint_provider: Some(OneOf::Right(InlayHintServerCapabilities::Options(
-                    InlayHintOptions {
+                inlay_hint_provider: self.enable_inlay_hints.then(|| {
+                    OneOf::Right(InlayHintServerCapabilities::Options(InlayHintOptions {
                         resolve_provider: Some(false),
                         work_done_progress_options: Default::default(),
-                    },
-                ))),
+                    }))
+                }),
                 code_action_provider: Some(CodeActionProviderCapability::Options(
                     CodeActionOptions {
                         code_action_kinds: Some(vec![CodeActionKind::QUICKFIX]),
@@ -481,7 +746,11 @@ impl LanguageServer for Backend {
                     },
                 )),
                 execute_command_provider: Some(ExecuteCommandOptions {
-                    commands: vec![COMMAND_RESOLVE.to_string(), COMMAND_UNRESOLVE.to_string()],
+                    commands: vec![
+                        COMMAND_RESOLVE.to_string(),
+                        COMMAND_UNRESOLVE.to_string(),
+                        COMMAND_OPEN_DRAFT.to_string(),
+                    ],
                     work_done_progress_options: Default::default(),
                 }),
                 ..Default::default()
@@ -494,6 +763,42 @@ impl LanguageServer for Backend {
         self.client
             .log_message(MessageType::INFO, "remark-lsp initialized")
             .await;
+        let repo_root = self.repo_root.read().ok().and_then(|root| root.clone());
+        let notes_ref = self.notes_ref.clone();
+        let base_ref = self.base_ref.clone();
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || -> Result<()> {
+                let Some(root) = repo_root else {
+                    return Ok(());
+                };
+                let repo = gix::open(&root).context("open repository")?;
+                crate::add_cmd::ensure_draft_exists(&repo, &notes_ref, base_ref.as_deref())?;
+                crate::add_cmd::sync_draft_notes(&repo, &notes_ref, base_ref.as_deref())?;
+                Ok(())
+            })
+            .await;
+
+            match result {
+                Err(err) => {
+                    client
+                        .log_message(
+                            MessageType::ERROR,
+                            format!("remark-lsp: init sync failed: {err}"),
+                        )
+                        .await;
+                }
+                Ok(Err(err)) => {
+                    client
+                        .log_message(
+                            MessageType::ERROR,
+                            format!("remark-lsp: init sync failed: {err:#}"),
+                        )
+                        .await;
+                }
+                Ok(Ok(())) => {}
+            }
+        });
     }
 
     async fn shutdown(&self) -> LspResult<()> {
@@ -501,6 +806,12 @@ impl LanguageServer for Backend {
     }
 
     async fn did_open(&self, params: tower_lsp::lsp_types::DidOpenTextDocumentParams) {
+        if let Ok(mut docs) = self.open_documents.write() {
+            docs.insert(params.text_document.uri.clone());
+        }
+        if self.sync_draft_if_needed(&params.text_document.uri).await {
+            return;
+        }
         self.publish_diagnostics(&params.text_document.uri).await;
     }
 
@@ -509,7 +820,17 @@ impl LanguageServer for Backend {
     }
 
     async fn did_save(&self, params: tower_lsp::lsp_types::DidSaveTextDocumentParams) {
+        if self.sync_draft_if_needed(&params.text_document.uri).await {
+            return;
+        }
         self.publish_diagnostics(&params.text_document.uri).await;
+    }
+
+    async fn did_close(&self, params: tower_lsp::lsp_types::DidCloseTextDocumentParams) {
+        if let Ok(mut docs) = self.open_documents.write() {
+            docs.remove(&params.text_document.uri);
+        }
+        let _ = self.sync_draft_if_needed(&params.text_document.uri).await;
     }
 
     async fn hover(&self, params: tower_lsp::lsp_types::HoverParams) -> LspResult<Option<Hover>> {
@@ -522,6 +843,9 @@ impl LanguageServer for Backend {
     }
 
     async fn inlay_hint(&self, params: InlayHintParams) -> LspResult<Option<Vec<InlayHint>>> {
+        if !self.enable_inlay_hints {
+            return Ok(None);
+        }
         Ok(Some(
             self.inlay_hints_for(&params.text_document.uri, params.range)
                 .await,
@@ -539,18 +863,28 @@ impl LanguageServer for Backend {
     }
 
     async fn execute_command(&self, params: ExecuteCommandParams) -> LspResult<Option<Value>> {
-        let Some(args) = params
-            .arguments
-            .into_iter()
-            .next()
-            .and_then(|value| serde_json::from_value::<ResolveArgs>(value).ok())
-        else {
-            return Ok(None);
-        };
-
         match params.command.as_str() {
             COMMAND_RESOLVE | COMMAND_UNRESOLVE => {
+                let Some(args) = params
+                    .arguments
+                    .into_iter()
+                    .next()
+                    .and_then(|value| serde_json::from_value::<ResolveArgs>(value).ok())
+                else {
+                    return Ok(None);
+                };
                 self.execute_remark_command(&params.command, args).await;
+            }
+            COMMAND_OPEN_DRAFT => {
+                let Some(args) = params
+                    .arguments
+                    .into_iter()
+                    .next()
+                    .and_then(|value| serde_json::from_value::<DraftArgs>(value).ok())
+                else {
+                    return Ok(None);
+                };
+                self.open_draft(args).await;
             }
             _ => {}
         }
@@ -668,6 +1002,20 @@ fn build_diag(
         message,
         ..Default::default()
     }
+}
+
+fn extract_root_path(params: &InitializeParams) -> Option<PathBuf> {
+    params
+        .root_uri
+        .as_ref()
+        .and_then(|uri| uri.to_file_path().ok())
+        .or_else(|| {
+            params
+                .workspace_folders
+                .as_ref()
+                .and_then(|folders| folders.first())
+                .and_then(|folder| folder.uri.to_file_path().ok())
+        })
 }
 
 #[cfg(test)]
@@ -863,10 +1211,7 @@ mod tests {
             message: "test commit\n".into(),
             extra_headers: Default::default(),
         };
-        let commit_id = repo
-            .write_object(commit)
-            .expect("write commit")
-            .detach();
+        let commit_id = repo.write_object(commit).expect("write commit").detach();
 
         repo.reference("HEAD", commit_id, PreviousValue::Any, "test commit")
             .expect("update HEAD");
@@ -883,8 +1228,8 @@ mod tests {
         base_ref: Option<&str>,
     ) {
         let head = crate::git::head_commit_oid(repo).expect("head commit");
-        let key = crate::git::note_file_key_oid(repo, head, view, base_ref, path)
-            .expect("note key");
+        let key =
+            crate::git::note_file_key_oid(repo, head, view, base_ref, path).expect("note key");
         let note = crate::review::encode_file_note(file);
         crate::notes::write(repo, notes_ref, &key, Some(&note)).expect("write note");
     }
@@ -913,14 +1258,9 @@ mod tests {
             None,
         );
 
-        let loaded = load_file_review(
-            &repo,
-            crate::git::DEFAULT_NOTES_REF,
-            "src/lib.rs",
-            None,
-        )
-        .expect("load review")
-        .expect("review present");
+        let loaded = load_file_review(&repo, crate::git::DEFAULT_NOTES_REF, "src/lib.rs", None)
+            .expect("load review")
+            .expect("review present");
 
         let file_comment = loaded.file_comment.expect("file comment");
         assert_eq!(file_comment.body, "file note");
@@ -968,14 +1308,9 @@ mod tests {
             None,
         );
 
-        let loaded = load_file_review(
-            &repo,
-            crate::git::DEFAULT_NOTES_REF,
-            "src/lib.rs",
-            None,
-        )
-        .expect("load review")
-        .expect("review present");
+        let loaded = load_file_review(&repo, crate::git::DEFAULT_NOTES_REF, "src/lib.rs", None)
+            .expect("load review")
+            .expect("review present");
         let comment = loaded.comments.get(&key).expect("line comment");
         assert_eq!(comment.body, "unresolved");
         assert!(!comment.resolved);
@@ -988,14 +1323,15 @@ mod tests {
         use tokio::io::AsyncWriteExt;
         let body = serde_json::to_string(&value).expect("serialize");
         let header = format!("Content-Length: {}\r\n\r\n", body.len());
-        write.write_all(header.as_bytes()).await.expect("write header");
+        write
+            .write_all(header.as_bytes())
+            .await
+            .expect("write header");
         write.write_all(body.as_bytes()).await.expect("write body");
         write.flush().await.expect("flush");
     }
 
-    async fn read_lsp_message<R: tokio::io::AsyncRead + Unpin>(
-        read: &mut R,
-    ) -> serde_json::Value {
+    async fn read_lsp_message<R: tokio::io::AsyncRead + Unpin>(read: &mut R) -> serde_json::Value {
         use tokio::io::AsyncReadExt;
         let mut header = Vec::new();
         loop {
@@ -1038,6 +1374,24 @@ mod tests {
             .expect("timeout")
     }
 
+    async fn wait_for_diagnostics<R: tokio::io::AsyncRead + Unpin>(
+        read: &mut R,
+        uri: &Url,
+    ) -> serde_json::Value {
+        let uri = uri.as_str().to_string();
+        wait_for_message(read, |msg| {
+            msg.get("method")
+                .and_then(|m| m.as_str())
+                .is_some_and(|m| m == "textDocument/publishDiagnostics")
+                && msg
+                    .get("params")
+                    .and_then(|params| params.get("uri"))
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|value| value == uri)
+        })
+        .await
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn lsp_end_to_end_diagnostics_and_hover() {
         let (td, repo) = init_repo_with_commit("src/lib.rs", "fn main() {}\n");
@@ -1066,15 +1420,20 @@ mod tests {
         let (service, socket) = LspService::new(|client| {
             Backend::new(
                 client,
-                repo_root.clone(),
+                Some(repo_root.clone()),
                 crate::git::DEFAULT_NOTES_REF.to_string(),
                 None,
                 false,
+                true,
+                true,
             )
         });
         let (server_read, server_write) = tokio::io::split(server_stream);
-        let server_task =
-            tokio::spawn(async move { Server::new(server_read, server_write, socket).serve(service).await });
+        let server_task = tokio::spawn(async move {
+            Server::new(server_read, server_write, socket)
+                .serve(service)
+                .await
+        });
 
         let (mut client_read, mut client_write) = tokio::io::split(client_stream);
         let root_uri = Url::from_directory_path(&repo_root).expect("root uri");
@@ -1092,8 +1451,8 @@ mod tests {
             }),
         )
         .await;
-        let _init = wait_for_message(&mut client_read, |msg| msg.get("id") == Some(&1.into()))
-            .await;
+        let _init =
+            wait_for_message(&mut client_read, |msg| msg.get("id") == Some(&1.into())).await;
 
         write_lsp_message(
             &mut client_write,
@@ -1125,9 +1484,7 @@ mod tests {
         .await;
 
         let diagnostics_msg = wait_for_message(&mut client_read, |msg| {
-            msg.get("method")
-                .and_then(|m| m.as_str())
-                == Some("textDocument/publishDiagnostics")
+            msg.get("method").and_then(|m| m.as_str()) == Some("textDocument/publishDiagnostics")
         })
         .await;
         let diagnostics = diagnostics_msg["params"]["diagnostics"]
@@ -1135,7 +1492,11 @@ mod tests {
             .expect("diagnostics array");
         let mut messages: Vec<String> = diagnostics
             .iter()
-            .filter_map(|diag| diag.get("message").and_then(|m| m.as_str()).map(|s| s.to_string()))
+            .filter_map(|diag| {
+                diag.get("message")
+                    .and_then(|m| m.as_str())
+                    .map(|s| s.to_string())
+            })
             .collect();
         messages.sort();
         assert!(messages.contains(&"file note".to_string()));
@@ -1157,8 +1518,8 @@ mod tests {
             }),
         )
         .await;
-        let inlay_msg = wait_for_message(&mut client_read, |msg| msg.get("id") == Some(&2.into()))
-            .await;
+        let inlay_msg =
+            wait_for_message(&mut client_read, |msg| msg.get("id") == Some(&2.into())).await;
         let inlays = inlay_msg["result"].as_array().expect("inlays array");
         assert!(inlays.iter().any(|hint| {
             hint.get("label")
@@ -1179,8 +1540,8 @@ mod tests {
             }),
         )
         .await;
-        let hover_msg = wait_for_message(&mut client_read, |msg| msg.get("id") == Some(&3.into()))
-            .await;
+        let hover_msg =
+            wait_for_message(&mut client_read, |msg| msg.get("id") == Some(&3.into())).await;
         let hover_contents = hover_msg["result"]["contents"]["value"]
             .as_str()
             .expect("hover contents");
@@ -1203,11 +1564,9 @@ mod tests {
             }),
         )
         .await;
-        let actions_msg = wait_for_message(&mut client_read, |msg| msg.get("id") == Some(&4.into()))
-            .await;
-        let actions = actions_msg["result"]
-            .as_array()
-            .expect("actions array");
+        let actions_msg =
+            wait_for_message(&mut client_read, |msg| msg.get("id") == Some(&4.into())).await;
+        let actions = actions_msg["result"].as_array().expect("actions array");
         let resolve_action = actions
             .iter()
             .find(|action| {
@@ -1229,13 +1588,11 @@ mod tests {
             }),
         )
         .await;
-        let _exec = wait_for_message(&mut client_read, |msg| msg.get("id") == Some(&5.into()))
-            .await;
+        let _exec =
+            wait_for_message(&mut client_read, |msg| msg.get("id") == Some(&5.into())).await;
 
         let diagnostics_msg = wait_for_message(&mut client_read, |msg| {
-            msg.get("method")
-                .and_then(|m| m.as_str())
-                == Some("textDocument/publishDiagnostics")
+            msg.get("method").and_then(|m| m.as_str()) == Some("textDocument/publishDiagnostics")
         })
         .await;
         let diagnostics = diagnostics_msg["params"]["diagnostics"]
@@ -1243,9 +1600,154 @@ mod tests {
             .expect("diagnostics array");
         let messages: Vec<String> = diagnostics
             .iter()
-            .filter_map(|diag| diag.get("message").and_then(|m| m.as_str()).map(|s| s.to_string()))
+            .filter_map(|diag| {
+                diag.get("message")
+                    .and_then(|m| m.as_str())
+                    .map(|s| s.to_string())
+            })
             .collect();
         assert_eq!(messages, vec!["file note".to_string()]);
+
+        server_task.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lsp_clears_diagnostics_after_draft_save() {
+        let (td, repo) = init_repo_with_commit("src/lib.rs", "fn main() {}\n");
+        let workdir = repo.workdir().expect("workdir");
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(workdir)
+            .arg("add")
+            .arg("src/lib.rs")
+            .status()
+            .expect("git add");
+        assert!(status.success(), "git add failed");
+        let file_review = FileReview {
+            file_comment: Some(comment("file note", false)),
+            comments: BTreeMap::from([(
+                LineKey {
+                    side: LineSide::New,
+                    line: 1,
+                },
+                comment("line note", false),
+            )]),
+            ..Default::default()
+        };
+        write_file_note(
+            &repo,
+            crate::git::DEFAULT_NOTES_REF,
+            "src/lib.rs",
+            ViewKind::All,
+            &file_review,
+            None,
+        );
+        crate::add_cmd::sync_draft_notes(&repo, crate::git::DEFAULT_NOTES_REF, None)
+            .expect("sync draft");
+
+        let repo_root = td.path().to_path_buf();
+        let (client_stream, server_stream) = tokio::io::duplex(4096);
+        let (service, socket) = LspService::new(|client| {
+            Backend::new(
+                client,
+                Some(repo_root.clone()),
+                crate::git::DEFAULT_NOTES_REF.to_string(),
+                None,
+                false,
+                true,
+                true,
+            )
+        });
+        let (server_read, server_write) = tokio::io::split(server_stream);
+        let server_task = tokio::spawn(async move {
+            Server::new(server_read, server_write, socket)
+                .serve(service)
+                .await
+        });
+
+        let (mut client_read, mut client_write) = tokio::io::split(client_stream);
+        let root_uri = Url::from_directory_path(&repo_root).expect("root uri");
+        write_lsp_message(
+            &mut client_write,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "processId": null,
+                    "rootUri": root_uri,
+                    "capabilities": {}
+                }
+            }),
+        )
+        .await;
+        let _init =
+            wait_for_message(&mut client_read, |msg| msg.get("id") == Some(&1.into())).await;
+
+        write_lsp_message(
+            &mut client_write,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "initialized",
+                "params": {}
+            }),
+        )
+        .await;
+
+        let file_path = repo_root.join("src/lib.rs");
+        let file_uri = Url::from_file_path(&file_path).expect("file uri");
+        write_lsp_message(
+            &mut client_write,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": {
+                    "textDocument": {
+                        "uri": file_uri,
+                        "languageId": "rust",
+                        "version": 1,
+                        "text": "fn main() {}\n"
+                    }
+                }
+            }),
+        )
+        .await;
+
+        let diagnostics_msg = wait_for_diagnostics(&mut client_read, &file_uri).await;
+        let diagnostics = diagnostics_msg["params"]["diagnostics"]
+            .as_array()
+            .expect("diagnostics array");
+        assert_eq!(diagnostics.len(), 2);
+
+        let draft_path = crate::add_cmd::draft_path(&repo).expect("draft path");
+        let empty = crate::review::render_prompt(&crate::review::Review::new(), |_, _| None);
+        std::fs::write(&draft_path, empty).expect("write draft");
+        let draft_uri = Url::from_file_path(&draft_path).expect("draft uri");
+        write_lsp_message(
+            &mut client_write,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": {
+                    "textDocument": {
+                        "uri": draft_uri,
+                        "languageId": "markdown",
+                        "version": 1,
+                        "text": "No comments.\n"
+                    }
+                }
+            }),
+        )
+        .await;
+
+        let diagnostics_msg = wait_for_diagnostics(&mut client_read, &file_uri).await;
+        let diagnostics = diagnostics_msg["params"]["diagnostics"]
+            .as_array()
+            .expect("diagnostics array");
+        assert!(
+            diagnostics.is_empty(),
+            "expected no diagnostics after draft save, got: {diagnostics:?}"
+        );
 
         server_task.abort();
     }

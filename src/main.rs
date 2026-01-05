@@ -1,12 +1,13 @@
+mod add_cmd;
 mod app;
 mod clipboard;
 mod config;
 mod diff;
+mod draft_cmd;
 mod file_tree;
 mod git;
 mod highlight;
 mod lsp;
-mod add_cmd;
 mod new_cmd;
 mod notes;
 mod prompt_cmd;
@@ -30,6 +31,26 @@ fn main() -> anyhow::Result<()> {
         command,
         ui,
     } = cli;
+
+    if let Some(config::Command::Lsp(cmd)) = command {
+        let cwd = std::env::current_dir().context("get current directory")?;
+        let repo = gix::discover(&cwd).ok();
+        let cfg = config::load_config(&global, &ui)?;
+        let notes_ref = match &repo {
+            Some(repo) => config::resolve_notes_ref(repo, &cfg, global.notes_ref.clone()),
+            None => global
+                .notes_ref
+                .or_else(|| cfg.notes_ref.clone())
+                .unwrap_or_else(|| crate::git::DEFAULT_NOTES_REF.to_string()),
+        };
+        let base_ref = config::resolve_base_ref_optional(&cfg, global.base_ref.clone());
+        let fetch_notes = config::resolve_fetch_notes(&cfg, global.fetch_notes);
+        if let Some(repo) = &repo {
+            maybe_fetch_notes(repo, &notes_ref, fetch_notes);
+        }
+        let repo_root = repo.and_then(|repo| repo.workdir().map(ToOwned::to_owned));
+        return lsp::run(repo_root, notes_ref, base_ref, cmd);
+    }
 
     let repo = gix::discover(std::env::current_dir().context("get current directory")?)
         .context("discover git repository")?;
@@ -61,13 +82,13 @@ fn main() -> anyhow::Result<()> {
             maybe_fetch_notes(&repo, &notes_ref, fetch_notes);
             add_cmd::run(&repo, &notes_ref, base_ref, cmd)
         }
-        Some(config::Command::Lsp(cmd)) => {
+        Some(config::Command::Draft(cmd)) => {
             let cfg = config::load_config(&global, &ui)?;
             let notes_ref = config::resolve_notes_ref(&repo, &cfg, global.notes_ref.clone());
             let base_ref = config::resolve_base_ref_optional(&cfg, global.base_ref.clone());
             let fetch_notes = config::resolve_fetch_notes(&cfg, global.fetch_notes);
             maybe_fetch_notes(&repo, &notes_ref, fetch_notes);
-            lsp::run(repo, notes_ref, base_ref, cmd)
+            draft_cmd::run(&repo, &notes_ref, base_ref, cmd)
         }
         None => {
             let cfg = config::load_config(&global, &ui)?;
@@ -87,6 +108,7 @@ fn main() -> anyhow::Result<()> {
             };
             app::run(repo, options)
         }
+        Some(config::Command::Lsp(_)) => unreachable!("handled above"),
     }
 }
 

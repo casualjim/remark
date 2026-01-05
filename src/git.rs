@@ -203,6 +203,22 @@ pub fn head_commit_oid(repo: &Repository) -> Result<ObjectId> {
     Ok(repo.head_commit().context("read HEAD commit")?.id)
 }
 
+pub fn normalize_repo_path(repo: &Repository, path: &str) -> String {
+    let mut out = path.to_string();
+    if let Some(stripped) = out.strip_prefix("./") {
+        out = stripped.to_string();
+    }
+    if let Some(wd) = repo.workdir() {
+        let p = std::path::Path::new(&out);
+        if p.is_absolute()
+            && let Ok(rel) = p.strip_prefix(wd)
+        {
+            out = rel.to_string_lossy().to_string();
+        }
+    }
+    out
+}
+
 pub fn note_file_key_oid(
     repo: &Repository,
     head_commit: ObjectId,

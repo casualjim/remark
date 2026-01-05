@@ -84,6 +84,12 @@ pub enum CommentState {
     HasUnresolved,
 }
 
+#[derive(Debug, Clone)]
+pub struct PromptSnippet {
+    pub code: String,
+    pub lang: String,
+}
+
 impl Review {
     pub fn new() -> Self {
         Self {
@@ -334,7 +340,7 @@ pub fn decode_file_note(note: &str) -> Option<FileReview> {
 
 pub fn render_prompt<F>(review: &Review, mut line_code: F) -> String
 where
-    F: FnMut(&str, LineKey) -> Option<String>,
+    F: FnMut(&str, LineKey) -> Option<PromptSnippet>,
 {
     let mut out = String::new();
     if review.files.is_empty() {
@@ -380,9 +386,13 @@ These notes are grouped by file. Every comment belongs to the file section it ap
         if !line_comments.is_empty() {
             out.push_str("### Line comments\n");
             for (line, comment) in line_comments {
-                out.push_str(&format!("- line {}\n", line.line));
-                if let Some(code) = line_code(path, *line) {
-                    push_fenced_block_with_lang(&mut out, &code, "diff");
+                out.push_str(&format!("- line {}", line.line));
+                if line.side == LineSide::Old {
+                    out.push_str(" (old)");
+                }
+                out.push('\n');
+                if let Some(snippet) = line_code(path, *line) {
+                    push_fenced_block_with_lang(&mut out, &snippet.code, &snippet.lang);
                 }
                 push_fenced_block(&mut out, comment);
             }
@@ -624,14 +634,17 @@ mod tests {
 
         let p = render_prompt(&r, |path, key| {
             if path == "a.rs" && key.side == LineSide::New && key.line == 10 {
-                Some("+let x = 1;".to_string())
+                Some(PromptSnippet {
+                    code: "let x = 1;".to_string(),
+                    lang: "rust".to_string(),
+                })
             } else {
                 None
             }
         });
 
-        assert!(p.contains("```diff"));
-        assert!(p.contains("+let x = 1;"));
+        assert!(p.contains("```rust"));
+        assert!(p.contains("let x = 1;"));
         assert!(p.contains("Fix this"));
     }
 }

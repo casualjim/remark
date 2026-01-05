@@ -12,7 +12,6 @@ use tui_textarea::TextArea;
 use crate::file_tree::FileTreeView;
 use crate::git::ViewKind;
 use crate::highlight::Highlighter;
-use crate::prompt_code::LineCodeResolver;
 use crate::review::{FileReview, LineKey, LineSide, Review};
 use unicode_width::UnicodeWidthStr;
 
@@ -230,6 +229,130 @@ pub(crate) struct FileEntry {
 }
 
 impl App {
+    fn build_notes_review(&self, head: ObjectId) -> Result<Review> {
+        let mut review = Review::new();
+        let base_for_key = self.base_ref_for_key().map(|s| s.to_string());
+        for e in &self.files {
+            let mut merged: Option<FileReview> = None;
+
+            let mut views_to_scan = vec![ViewKind::All, ViewKind::Staged, ViewKind::Unstaged];
+            if self.view == ViewKind::Base {
+                views_to_scan.push(ViewKind::Base);
+            }
+
+            for view in views_to_scan {
+                let base_for_key = match view {
+                    ViewKind::Base => base_for_key.as_deref(),
+                    _ => None,
+                };
+                let oid =
+                    crate::git::note_file_key_oid(&self.repo, head, view, base_for_key, &e.path)?;
+                let note = crate::notes::read(&self.repo, &self.notes_ref, &oid)
+                    .with_context(|| format!("read file note for '{}'", e.path))?;
+                let Some(text) = note.as_deref() else {
+                    continue;
+                };
+                let Some(fr) = crate::review::decode_file_note(text) else {
+                    continue;
+                };
+                merged = Some(match merged {
+                    None => fr,
+                    Some(mut existing) => {
+                        merge_file_review(&mut existing, fr);
+                        existing
+                    }
+                });
+            }
+
+            if let Some(fr) = merged {
+                review.files.insert(e.path.clone(), fr);
+            }
+        }
+        Ok(review)
+    }
+
+    fn merge_draft_into_notes(&self, mut notes: Review, draft: Review) -> Review {
+        for file in notes.files.values_mut() {
+            file.file_comment = None;
+            file.comments.clear();
+        }
+
+        for (path, draft_file) in draft.files {
+            let entry = notes.files.entry(path).or_default();
+            entry.file_comment = draft_file.file_comment;
+            entry.comments = draft_file.comments;
+        }
+
+        notes
+    }
+
+    fn refresh_review_from_sources(&mut self) -> Result<()> {
+        if self.head_commit_oid.is_some() {
+            crate::add_cmd::sync_draft_notes(
+                &self.repo,
+                &self.notes_ref,
+                self.base_ref.as_deref(),
+            )?;
+        }
+        let draft_review = crate::add_cmd::load_review_from_draft(
+            &self.repo,
+            &self.notes_ref,
+            self.base_ref.as_deref(),
+        )?;
+        let notes_review = if let Some(head) = self.head_commit_oid {
+            self.build_notes_review(head)?
+        } else {
+            self.status = "No HEAD commit (unborn branch) — notes disabled".to_string();
+            Review::new()
+        };
+        self.review = self.merge_draft_into_notes(notes_review, draft_review);
+        Ok(())
+    }
+
+    fn read_prompt_from_draft(&mut self) -> String {
+        if self.head_commit_oid.is_some() {
+            if let Err(e) = crate::add_cmd::sync_draft_notes(
+                &self.repo,
+                &self.notes_ref,
+                self.base_ref.as_deref(),
+            ) {
+                self.status = format!("Failed to sync draft: {e}");
+            }
+        } else if let Err(e) = crate::add_cmd::ensure_draft_exists(
+            &self.repo,
+            &self.notes_ref,
+            self.base_ref.as_deref(),
+        ) {
+            self.status = format!("Failed to create draft: {e}");
+        }
+
+        let path = match crate::add_cmd::draft_path(&self.repo) {
+            Ok(p) => p,
+            Err(e) => {
+                self.status = format!("Failed to find draft: {e}");
+                return "No comments.\n".to_string();
+            }
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(content) => {
+                if content.trim().is_empty() {
+                    "No comments.\n".to_string()
+                } else {
+                    content
+                }
+            }
+            Err(e) => {
+                self.status = format!("Failed to read draft: {e}");
+                "No comments.\n".to_string()
+            }
+        }
+    }
+
+    fn refresh_prompt_buffer_from_draft(&mut self) {
+        let prompt = self.read_prompt_from_draft();
+        self.prompt_buffer = crate::ui::textarea_from_string(&prompt);
+    }
+
     fn new(
         repo: gix::Repository,
         notes_ref: String,
@@ -491,8 +614,7 @@ impl App {
                 self.mode = Mode::Browse;
             } else {
                 self.show_prompt = true;
-                self.prompt_buffer =
-                    crate::ui::textarea_from_string(&self.render_prompt_with_code());
+                self.refresh_prompt_buffer_from_draft();
                 self.mode = Mode::EditPrompt;
             }
             return Ok(false);
@@ -645,7 +767,7 @@ impl App {
             && key.modifiers.contains(KeyModifiers::CONTROL)
             && !key.modifiers.contains(KeyModifiers::ALT)
         {
-            let prompt = crate::ui::textarea_contents(&self.prompt_buffer);
+            let prompt = self.read_prompt_from_draft();
             match crate::clipboard::copy(&prompt) {
                 Ok(method) => self.status = format!("Copied prompt to clipboard ({method})"),
                 Err(e) => self.status = format!("Clipboard failed: {e}"),
@@ -656,7 +778,7 @@ impl App {
         }
 
         if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT) {
-            let prompt = crate::ui::textarea_contents(&self.prompt_buffer);
+            let prompt = self.read_prompt_from_draft();
             match crate::clipboard::copy(&prompt) {
                 Ok(method) => self.status = format!("Copied prompt to clipboard ({method})"),
                 Err(e) => self.status = format!("Clipboard failed: {e}"),
@@ -1034,56 +1156,7 @@ impl App {
             return Ok(());
         }
 
-        // Build an in-memory review by loading per-file notes for the current HEAD commit.
-        // Notes are treated as view-agnostic (staged/unstaged/all) for worktree reviews.
-        self.review = Review::new();
-        self.review.files.clear();
-        if let Some(head) = self.head_commit_oid {
-            let base_for_key = self.base_ref_for_key().map(|s| s.to_string());
-            for e in &self.files {
-                let mut merged: Option<FileReview> = None;
-
-                let mut views_to_scan = vec![ViewKind::All, ViewKind::Staged, ViewKind::Unstaged];
-                if self.view == ViewKind::Base {
-                    views_to_scan.push(ViewKind::Base);
-                }
-
-                for view in views_to_scan {
-                    let base_for_key = match view {
-                        ViewKind::Base => base_for_key.as_deref(),
-                        _ => None,
-                    };
-                    let oid = crate::git::note_file_key_oid(
-                        &self.repo,
-                        head,
-                        view,
-                        base_for_key,
-                        &e.path,
-                    )?;
-                    let note = crate::notes::read(&self.repo, &self.notes_ref, &oid)
-                        .with_context(|| format!("read file note for '{}'", e.path))?;
-                    let Some(text) = note.as_deref() else {
-                        continue;
-                    };
-                    let Some(fr) = crate::review::decode_file_note(text) else {
-                        continue;
-                    };
-                    merged = Some(match merged {
-                        None => fr,
-                        Some(mut existing) => {
-                            merge_file_review(&mut existing, fr);
-                            existing
-                        }
-                    });
-                }
-
-                if let Some(fr) = merged {
-                    self.review.files.insert(e.path.clone(), fr);
-                }
-            }
-        } else {
-            self.status = "No HEAD commit (unborn branch) — notes disabled".to_string();
-        }
+        self.refresh_review_from_sources()?;
 
         self.reviewed_files = self
             .review
@@ -1152,53 +1225,7 @@ impl App {
         // Ensure the tree mapping is up-to-date for the selected file.
         self.file_tree = FileTreeView::build(&self.files);
 
-        // Rebuild an in-memory view of notes (in case an external process edited notes).
-        self.review = Review::new();
-        self.review.files.clear();
-        if let Some(head) = self.head_commit_oid {
-            let base_for_key = self.base_ref_for_key().map(|s| s.to_string());
-            for e in &self.files {
-                let mut merged: Option<FileReview> = None;
-
-                let mut views_to_scan = vec![ViewKind::All, ViewKind::Staged, ViewKind::Unstaged];
-                if self.view == ViewKind::Base {
-                    views_to_scan.push(ViewKind::Base);
-                }
-
-                for view in views_to_scan {
-                    let base_for_key = match view {
-                        ViewKind::Base => base_for_key.as_deref(),
-                        _ => None,
-                    };
-                    let oid = crate::git::note_file_key_oid(
-                        &self.repo,
-                        head,
-                        view,
-                        base_for_key,
-                        &e.path,
-                    )?;
-                    let note = crate::notes::read(&self.repo, &self.notes_ref, &oid)
-                        .with_context(|| format!("read file note for '{}'", e.path))?;
-                    let Some(text) = note.as_deref() else {
-                        continue;
-                    };
-                    let Some(fr) = crate::review::decode_file_note(text) else {
-                        continue;
-                    };
-                    merged = Some(match merged {
-                        None => fr,
-                        Some(mut existing) => {
-                            merge_file_review(&mut existing, fr);
-                            existing
-                        }
-                    });
-                }
-
-                if let Some(fr) = merged {
-                    self.review.files.insert(e.path.clone(), fr);
-                }
-            }
-        }
+        self.refresh_review_from_sources()?;
 
         self.reviewed_files = self
             .review
@@ -1977,15 +2004,74 @@ impl App {
     }
 
     fn persist_file_note(&mut self, path: &str) -> Result<()> {
-        let Some(head) = self.head_commit_oid else {
-            self.status = "No HEAD commit — cannot write notes".to_string();
+        crate::add_cmd::write_draft_from_review(
+            &self.repo,
+            &self.notes_ref,
+            self.base_ref.as_deref(),
+            &self.review,
+        )?;
+
+        if self.head_commit_oid.is_none() {
+            self.status = "No HEAD commit — notes disabled".to_string();
             return Ok(());
-        };
-        self.persist_file_note_with_head(head, path)?;
+        }
+
+        self.persist_resolved_state(path)?;
+
+        let report = crate::add_cmd::sync_draft_notes(
+            &self.repo,
+            &self.notes_ref,
+            self.base_ref.as_deref(),
+        )?;
+        if report.draft_updated {
+            self.refresh_review_from_sources()?;
+        }
+
+        self.persist_reviewed_state(path)?;
         Ok(())
     }
 
-    fn persist_file_note_with_head(&mut self, head: ObjectId, path: &str) -> Result<bool> {
+    fn persist_resolved_state(&mut self, path: &str) -> Result<()> {
+        let Some(head) = self.head_commit_oid else {
+            return Ok(());
+        };
+        let (view_for_key, base_for_key) = match self.view {
+            ViewKind::Base => (ViewKind::Base, self.base_ref_for_key()),
+            _ => (ViewKind::All, None),
+        };
+
+        let oid =
+            crate::git::note_file_key_oid(&self.repo, head, view_for_key, base_for_key, path)?;
+        let note = crate::notes::read(&self.repo, &self.notes_ref, &oid)
+            .with_context(|| format!("read file note for '{path}'"))?;
+        let Some(text) = note.as_deref() else {
+            return Ok(());
+        };
+        let mut file = crate::review::decode_file_note(text).unwrap_or_default();
+
+        if let Some(review_file) = self.review.files.get(path) {
+            if let (Some(src), Some(dest)) = (&review_file.file_comment, &mut file.file_comment) {
+                dest.resolved = src.resolved;
+            }
+            for (key, comment) in &review_file.comments {
+                if let Some(existing) = file.comments.get_mut(key) {
+                    existing.resolved = comment.resolved;
+                }
+            }
+        }
+
+        if !file.comments.is_empty() || file.file_comment.is_some() || file.reviewed {
+            let note = crate::review::encode_file_note(&file);
+            crate::notes::write(&self.repo, &self.notes_ref, &oid, Some(&note))
+                .with_context(|| format!("write file note for '{path}'"))?;
+        }
+        Ok(())
+    }
+
+    fn persist_reviewed_state(&mut self, path: &str) -> Result<()> {
+        let Some(head) = self.head_commit_oid else {
+            return Ok(());
+        };
         // Worktree review notes are view-agnostic: always store them under the `all` key.
         // Base-diff notes stay under the `base` key because line anchors are relative to that diff.
         let (view_for_key, base_for_key) = match self.view {
@@ -1996,21 +2082,32 @@ impl App {
         let oid =
             crate::git::note_file_key_oid(&self.repo, head, view_for_key, base_for_key, path)?;
 
-        match self.review.files.get(path) {
-            Some(file)
-                if !file.comments.is_empty() || file.file_comment.is_some() || file.reviewed =>
-            {
-                let note = crate::review::encode_file_note(file);
-                crate::notes::write(&self.repo, &self.notes_ref, &oid, Some(&note))
-                    .with_context(|| format!("write file note for '{path}'"))?;
-                Ok(true)
-            }
-            _ => {
-                crate::notes::write(&self.repo, &self.notes_ref, &oid, None)
-                    .with_context(|| format!("delete file note for '{path}'"))?;
-                Ok(false)
-            }
+        let note = crate::notes::read(&self.repo, &self.notes_ref, &oid)
+            .with_context(|| format!("read file note for '{path}'"))?;
+        let mut file = note
+            .as_deref()
+            .and_then(crate::review::decode_file_note)
+            .unwrap_or_default();
+
+        let (reviewed, reviewed_hash) = self
+            .review
+            .files
+            .get(path)
+            .map(|f| (f.reviewed, f.reviewed_hash.clone()))
+            .unwrap_or((false, None));
+
+        file.reviewed = reviewed;
+        file.reviewed_hash = reviewed_hash;
+
+        if !file.comments.is_empty() || file.file_comment.is_some() || file.reviewed {
+            let note = crate::review::encode_file_note(&file);
+            crate::notes::write(&self.repo, &self.notes_ref, &oid, Some(&note))
+                .with_context(|| format!("write file note for '{path}'"))?;
+        } else {
+            crate::notes::write(&self.repo, &self.notes_ref, &oid, None)
+                .with_context(|| format!("delete file note for '{path}'"))?;
         }
+        Ok(())
     }
 }
 
@@ -2099,32 +2196,6 @@ impl App {
             ),
         };
         Ok(out)
-    }
-
-    fn render_prompt_with_code(&self) -> String {
-        let base_tree = self
-            .base_ref
-            .as_deref()
-            .and_then(|b| crate::git::merge_base_tree(&self.repo, b).ok());
-
-        let mut view_order = vec![self.view];
-        for view in [
-            ViewKind::All,
-            ViewKind::Staged,
-            ViewKind::Unstaged,
-            ViewKind::Base,
-        ] {
-            if view == ViewKind::Base && self.base_ref.is_none() {
-                continue;
-            }
-            if !view_order.contains(&view) {
-                view_order.push(view);
-            }
-        }
-
-        let mut resolver =
-            LineCodeResolver::new(&self.repo, base_tree, self.diff_context, view_order);
-        crate::review::render_prompt(&self.review, |path, key| resolver.line_code(path, key))
     }
 
     fn review_hash_for_view(

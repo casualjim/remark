@@ -11,6 +11,7 @@ pub fn run(
     cmd: ResolveCli,
 ) -> Result<()> {
     let file = cmd.file.context("missing --file <path>")?;
+    let file = crate::git::normalize_repo_path(repo, &file);
     if cmd.file_comment && cmd.line.is_some() {
         anyhow::bail!("use either --file-comment or --line (not both)");
     }
@@ -88,5 +89,6 @@ pub fn run(
         anyhow::bail!("no matching comment found to resolve");
     }
 
+    crate::add_cmd::sync_draft_notes(repo, notes_ref, base_ref.as_deref())?;
     Ok(())
 }
