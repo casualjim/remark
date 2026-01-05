@@ -1,3 +1,14 @@
+## [0.2.4] - 2026-01-05
+
+### 🐛 Bug Fixes
+
+- Restore draft sync and draft actions
+## [0.2.3] - 2026-01-05
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.2.3 [ci skip]
+- Release remark version 0.2.3
 ## [0.2.2] - 2026-01-05
 
 ### 🐛 Bug Fixes
