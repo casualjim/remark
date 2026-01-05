@@ -1,4 +1,4 @@
-## [0.1.16] - 2026-01-05
+## [0.2.0] - 2026-01-05
 
 ### 🚀 Features
 
@@ -23,6 +23,7 @@
 ### ⚙️ Miscellaneous Tasks
 
 - Improve visible hints for lsp
+
 ## [0.1.15] - 2026-01-03
 
 ### 🚀 Features
