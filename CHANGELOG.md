@@ -23,7 +23,9 @@
 ### ⚙️ Miscellaneous Tasks
 
 - Improve visible hints for lsp
-
+- Update changelog for v0.1.16 [ci skip]
+- Release remark version 0.1.16
+- Release v0.2.0
 ## [0.1.15] - 2026-01-03
 
 ### 🚀 Features
