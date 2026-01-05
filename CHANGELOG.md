@@ -7,6 +7,11 @@
 ### 🧪 Testing
 
 - Cover diff wrapping regression
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.2.2 [ci skip]
+- Release remark version 0.2.2
 ## [0.2.1] - 2026-01-05
 
 ### ⚙️ Miscellaneous Tasks
