@@ -259,6 +259,39 @@ Notes:
 To run the task, open the command palette and use **task: spawn**, then pick the
 `remark: open draft ...` entry.
 
+## VS Code integration
+
+VS Code doesn’t start arbitrary language servers without an extension, and we
+don’t ship a VS Code extension yet. You can still use remark via the CLI and a
+task to open the draft.
+
+### Draft workflow (tasks)
+
+Create a project-local tasks file at `.vscode/tasks.json`:
+
+```json
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "remark: open draft",
+      "type": "shell",
+      "command": "bash",
+      "args": ["-lc", "code \"$(remark draft)\""]
+    }
+  ]
+}
+```
+
+Notes:
+- Requires the `code` CLI to be on your PATH.
+- The draft file is inside `.git`, so it won’t show up in git status.
+
+Workflow:
+1) Use `remark add --draft ...` to seed a comment (or edit the draft directly).
+2) Run **Tasks: Run Task** → `remark: open draft`.
+3) Edit and save; `remark` will sync draft changes on the next command or prompt.
+
 ## Keybindings
 
 ### Global / browse mode
