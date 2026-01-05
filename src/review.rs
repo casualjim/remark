@@ -157,10 +157,7 @@ impl Review {
                 line: line_1_based,
             };
             let resolved = f.comments.get(&key).map(|c| c.resolved).unwrap_or(false);
-            let snippet_hash = f
-                .comments
-                .get(&key)
-                .and_then(|c| c.snippet_hash.clone());
+            let snippet_hash = f.comments.get(&key).and_then(|c| c.snippet_hash.clone());
             f.comments.insert(
                 key,
                 Comment {

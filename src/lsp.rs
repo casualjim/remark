@@ -563,7 +563,6 @@ impl Backend {
 
         if let Err(err) = crate::add_cmd::run(&repo, &self.notes_ref, self.base_ref.clone(), cmd) {
             self.log_error(err).await;
-            return;
         }
     }
 
@@ -696,10 +695,10 @@ fn sync_once(root: &Path, notes_ref: &str, base_ref: Option<&str>) -> Result<()>
 
 fn should_sync_path(root: &Path, path: &Path) -> bool {
     // Check if path is within root
-    if let (Ok(abs), Ok(root_abs)) = (std::fs::canonicalize(path), std::fs::canonicalize(root)) {
-        if !abs.starts_with(&root_abs) {
-            return false;
-        }
+    if let (Ok(abs), Ok(root_abs)) = (std::fs::canonicalize(path), std::fs::canonicalize(root))
+        && !abs.starts_with(&root_abs)
+    {
+        return false;
     }
 
     // Check if it's a regular file (not a directory or symlink)
@@ -952,16 +951,13 @@ impl LanguageServer for Backend {
                 Ok(())
             })();
 
-            match result {
-                Err(err) => {
-                    client
-                        .log_message(
-                            MessageType::ERROR,
-                            format!("remark-lsp: init sync failed: {err:#}"),
-                        )
-                        .await;
-                }
-                Ok(()) => {}
+            if let Err(err) = result {
+                client
+                    .log_message(
+                        MessageType::ERROR,
+                        format!("remark-lsp: init sync failed: {err:#}"),
+                    )
+                    .await;
             }
         });
     }
