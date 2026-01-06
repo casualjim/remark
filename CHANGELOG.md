@@ -1,3 +1,8 @@
+## [0.2.6] - 2026-01-06
+
+### 🐛 Bug Fixes
+
+- Skip fetching missing notes ref
 ## [0.2.5] - 2026-01-06
 
 ### 🚀 Features
@@ -12,6 +17,8 @@
 ### ⚙️ Miscellaneous Tasks
 
 - Fix clippy lints in lsp.rs
+- Update changelog for v0.2.5 [ci skip]
+- Release remark version 0.2.5
 ## [0.2.4] - 2026-01-05
 
 ### 🐛 Bug Fixes
