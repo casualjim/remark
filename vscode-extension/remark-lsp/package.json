@@ -1,0 +1,122 @@
+{
+  "name": "remark-lsp",
+  "displayName": "remark-lsp",
+  "description": "LSP integration for remark code review notes",
+  "version": "0.1.0",
+  "publisher": "casualjim",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.86.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:remark.openDraft",
+    "onCommand:remark.restartLsp"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "remark.openDraft",
+        "title": "Remark: Open Draft"
+      },
+      {
+        "command": "remark.restartLsp",
+        "title": "Remark: Restart LSP"
+      },
+      {
+        "command": "remark.createComment",
+        "title": "Add Comment",
+        "enablement": "!commentIsEmpty"
+      },
+      {
+        "command": "remark.resolveComment",
+        "title": "Resolve Comment"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "remark.createComment",
+          "when": "false"
+        },
+        {
+          "command": "remark.resolveComment",
+          "when": "false"
+        }
+      ],
+      "comments/commentThread/context": [
+        {
+          "command": "remark.createComment",
+          "group": "inline",
+          "when": "commentController == remark && commentThreadIsEmpty"
+        }
+      ],
+      "comments/commentThread/title": [
+        {
+          "command": "remark.resolveComment",
+          "group": "navigation",
+          "when": "commentController == remark && commentThread == remarkExisting"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Remark",
+      "properties": {
+        "remark.path": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the remark binary. Leave empty to use PATH."
+        },
+        "remark.lspArgs": {
+          "type": [
+            "string",
+            "array"
+          ],
+          "default": "",
+          "description": "Extra args passed to `remark lsp`. Use a string or an array of args."
+        },
+        "remark.languages": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "*"
+          ],
+          "description": "Language ids that should use remark-lsp. Use [\"*\"] to enable for all languages."
+        }
+      }
+    },
+    "taskDefinitions": [
+      {
+        "type": "remark",
+        "required": [],
+        "properties": {
+          "task": {
+            "type": "string",
+            "description": "Remark task name",
+            "enum": [
+              "openDraft"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.24",
+    "@types/vscode": "^1.86.0",
+    "typescript": "^5.4.5"
+  }
+}

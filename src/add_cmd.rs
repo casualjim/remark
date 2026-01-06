@@ -22,25 +22,6 @@ pub fn run(
     base_ref: Option<String>,
     cmd: AddCli,
 ) -> Result<()> {
-    if cmd.draft && cmd.apply {
-        anyhow::bail!("use either --draft or --apply (not both)");
-    }
-    if cmd.apply {
-        let report = apply_draft(repo, notes_ref, base_ref.as_deref(), true)?;
-        if !report.skipped.is_empty() {
-            for skip in report.skipped {
-                eprintln!(
-                    "remark: skipped {}:{} ({}) - {}",
-                    skip.file,
-                    skip.line,
-                    side_label(skip.side),
-                    skip.reason
-                );
-            }
-        }
-        return Ok(());
-    }
-
     let file = cmd.file.context("missing --file <path>")?;
     let file = crate::git::normalize_repo_path(repo, &file);
     if cmd.file_comment && cmd.line.is_some() {
@@ -55,21 +36,6 @@ pub fn run(
     let mut side = cmd.side;
     if !file_comment && cmd.line.is_some() && side.is_none() {
         side = Some(LineSide::New);
-    }
-
-    if cmd.draft {
-        return write_draft(
-            repo,
-            notes_ref,
-            base_ref.as_deref(),
-            DraftWriteArgs {
-                file: &file,
-                file_comment,
-                line: cmd.line,
-                side,
-                print_path: cmd.print_path,
-            },
-        );
     }
 
     let existing = load_file_review(repo, notes_ref, &file)?;
@@ -303,6 +269,79 @@ pub(crate) fn ensure_draft_exists(
     Ok(())
 }
 
+pub(crate) fn write_draft_placeholder(
+    repo: &gix::Repository,
+    notes_ref: &str,
+    base_ref: Option<&str>,
+    file: &str,
+    line: Option<u32>,
+    side: Option<LineSide>,
+    file_comment: bool,
+) -> Result<()> {
+    let path = draft_path(repo)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).context("create draft directory")?;
+    }
+
+    let mut draft_review = load_draft_review(&path)?;
+    let existing = load_file_review(repo, notes_ref, file)?;
+    let line = if file_comment {
+        None
+    } else {
+        Some(line.context("missing --line <n>")?)
+    };
+    let side = if file_comment {
+        None
+    } else {
+        Some(side.unwrap_or(LineSide::New))
+    };
+
+    let current_body = if file_comment {
+        draft_review
+            .file_comment(file)
+            .map(|c| c.to_string())
+            .or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|f| f.file_comment.as_ref().map(|c| c.body.clone()))
+            })
+            .unwrap_or_default()
+    } else {
+        let line = line.unwrap_or(1);
+        let side = side.unwrap_or(LineSide::New);
+        draft_review
+            .line_comment(file, side, line)
+            .map(|c| c.to_string())
+            .or_else(|| {
+                existing.as_ref().and_then(|f| {
+                    f.comments
+                        .get(&LineKey { side, line })
+                        .map(|c| c.body.clone())
+                })
+            })
+            .unwrap_or_default()
+    };
+
+    let current_body = if current_body.trim().is_empty() {
+        DRAFT_PLACEHOLDER.to_string()
+    } else {
+        current_body
+    };
+
+    if file_comment {
+        draft_review.set_file_comment(file, current_body);
+    } else {
+        let line = line.context("missing --line <n>")?;
+        let side = side.unwrap_or(LineSide::New);
+        draft_review.set_line_comment(file, side, line, current_body);
+    }
+
+    let draft = render_prompt_draft(repo, base_ref, &draft_review);
+    std::fs::write(&path, draft).context("write draft file")?;
+    rebuild_draft_meta(repo, notes_ref, base_ref, &draft_review, None)?;
+    Ok(())
+}
+
 pub(crate) fn remove_from_draft(
     repo: &gix::Repository,
     base_ref: Option<&str>,
@@ -341,100 +380,6 @@ pub(crate) fn remove_from_draft(
     Ok(())
 }
 
-struct DraftWriteArgs<'a> {
-    file: &'a str,
-    file_comment: bool,
-    line: Option<u32>,
-    side: Option<LineSide>,
-    print_path: bool,
-}
-
-fn write_draft(
-    repo: &gix::Repository,
-    notes_ref: &str,
-    base_ref: Option<&str>,
-    args: DraftWriteArgs<'_>,
-) -> Result<()> {
-    let path = draft_path(repo)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).context("create draft directory")?;
-    }
-
-    let mut draft_review = load_draft_review(&path)?;
-    let existing = load_file_review(repo, notes_ref, args.file)?;
-    let line = if args.file_comment {
-        None
-    } else {
-        Some(args.line.context("missing --line <n>")?)
-    };
-    let side = if args.file_comment {
-        None
-    } else {
-        Some(args.side.unwrap_or(LineSide::New))
-    };
-
-    let current_body = if args.file_comment {
-        draft_review
-            .file_comment(args.file)
-            .map(|c| c.to_string())
-            .or_else(|| {
-                existing
-                    .as_ref()
-                    .and_then(|f| f.file_comment.as_ref().map(|c| c.body.clone()))
-            })
-            .unwrap_or_default()
-    } else {
-        let line = line.unwrap_or(1);
-        let side = side.unwrap_or(LineSide::New);
-        draft_review
-            .line_comment(args.file, side, line)
-            .map(|c| c.to_string())
-            .or_else(|| {
-                existing.as_ref().and_then(|f| {
-                    f.comments
-                        .get(&LineKey { side, line })
-                        .map(|c| c.body.clone())
-                })
-            })
-            .unwrap_or_default()
-    };
-
-    let current_body = if current_body.trim().is_empty() {
-        DRAFT_PLACEHOLDER.to_string()
-    } else {
-        current_body
-    };
-
-    if args.file_comment {
-        draft_review.set_file_comment(args.file, current_body);
-    } else {
-        let line = line.context("missing --line <n>")?;
-        let side = side.unwrap_or(LineSide::New);
-        draft_review.set_line_comment(args.file, side, line, current_body);
-    }
-
-    let draft = render_prompt_draft(repo, base_ref, &draft_review);
-    std::fs::write(&path, draft).context("write draft file")?;
-    rebuild_draft_meta(repo, notes_ref, base_ref, &draft_review, None)?;
-    if args.print_path {
-        println!("{}", path.display());
-    }
-    Ok(())
-}
-
-#[derive(Default)]
-pub(crate) struct ApplyReport {
-    pub(crate) applied: usize,
-    pub(crate) skipped: Vec<ApplySkip>,
-}
-
-pub(crate) struct ApplySkip {
-    pub(crate) file: String,
-    pub(crate) line: u32,
-    pub(crate) side: LineSide,
-    pub(crate) reason: String,
-}
-
 #[derive(Clone, Copy)]
 pub(crate) enum SyncAction {
     None,
@@ -449,104 +394,6 @@ pub(crate) enum DraftSyncMode {
 
 pub(crate) struct SyncReport {
     pub(crate) draft_updated: bool,
-}
-
-pub(crate) fn apply_draft(
-    repo: &gix::Repository,
-    notes_ref: &str,
-    base_ref: Option<&str>,
-    remove_after: bool,
-) -> Result<ApplyReport> {
-    let path = draft_path(repo)?;
-    let content = std::fs::read_to_string(&path).context("read draft file")?;
-    let review = parse_prompt_draft(&content)?;
-    let meta = load_draft_meta(repo).unwrap_or_default();
-    let meta_map = meta_hash_map(&meta);
-    let diff_context = prompt_diff_context(repo);
-    let base_tree = base_ref.and_then(|b| crate::git::merge_base_tree(repo, b).ok());
-    let view_order = prompt_view_order(base_ref.is_some());
-    let mut resolver = LineSnippetResolver::new(repo, base_tree, diff_context, view_order);
-    let mut report = ApplyReport::default();
-    for (path_key, file_review) in &review.files {
-        let mut updated = Review::new();
-        if let Some(existing) = load_file_review(repo, notes_ref, path_key)? {
-            updated.files.insert(path_key.to_string(), existing);
-        }
-
-        if file_review.file_comment.is_none() {
-            updated.remove_file_comment(path_key);
-        }
-
-        let draft_keys: std::collections::BTreeSet<LineKey> =
-            file_review.comments.keys().copied().collect();
-        let existing_keys = updated
-            .files
-            .get(path_key)
-            .map(|f| f.comments.keys().copied().collect::<Vec<_>>())
-            .unwrap_or_default();
-        for key in existing_keys {
-            if !draft_keys.contains(&key) {
-                updated.remove_line_comment(path_key, key.side, key.line);
-            }
-        }
-
-        if let Some(fc) = file_review.file_comment.as_ref() {
-            updated.set_file_comment(path_key, fc.clone());
-            report.applied += 1;
-        }
-        for (line_key, comment) in &file_review.comments {
-            let snippet = resolver.snippet(path_key, *line_key);
-            let Some(snippet) = snippet else {
-                report.skipped.push(ApplySkip {
-                    file: path_key.to_string(),
-                    line: line_key.line,
-                    side: line_key.side,
-                    reason: "no snippet available".to_string(),
-                });
-                continue;
-            };
-            let hash = snippet_hash(path_key, *line_key, &snippet)?;
-            let meta_key = meta_key(path_key, side_label(line_key.side), line_key.line);
-            let stored = match meta_map.get(&meta_key) {
-                None => {
-                    report.skipped.push(ApplySkip {
-                        file: path_key.to_string(),
-                        line: line_key.line,
-                        side: line_key.side,
-                        reason: "missing checksum".to_string(),
-                    });
-                    continue;
-                }
-                Some(stored) if stored != &hash => {
-                    report.skipped.push(ApplySkip {
-                        file: path_key.to_string(),
-                        line: line_key.line,
-                        side: line_key.side,
-                        reason: "draft out of date".to_string(),
-                    });
-                    continue;
-                }
-                Some(stored) => stored.clone(),
-            };
-            updated.set_line_comment(path_key, line_key.side, line_key.line, comment.clone());
-            updated.set_line_comment_snippet_hash(
-                path_key,
-                line_key.side,
-                line_key.line,
-                Some(stored),
-            );
-            report.applied += 1;
-        }
-
-        persist_file_review(repo, notes_ref, path_key, updated.files.get(path_key))?;
-    }
-
-    if remove_after {
-        std::fs::remove_file(&path).ok();
-        let meta_path = draft_meta_path(repo)?;
-        std::fs::remove_file(meta_path).ok();
-    }
-    Ok(report)
 }
 
 pub(crate) fn sync_draft_notes(
@@ -913,7 +760,14 @@ fn rebuild_draft_meta(
         }
     }
 
-    write_draft_meta(&meta_path, &meta)
+    let content = serde_json::to_string_pretty(&meta).context("serialize draft metadata")?;
+    if let Ok(existing) = std::fs::read_to_string(&meta_path)
+        && existing.trim_end() == content
+    {
+        return Ok(());
+    }
+    std::fs::write(&meta_path, content).context("write draft metadata")?;
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -1409,29 +1263,6 @@ Old note
         let draft = parse_prompt_draft(content).unwrap();
         assert!(draft.file_comment("src/lib.rs").is_none());
         assert!(draft.line_comment("src/lib.rs", LineSide::New, 3).is_none());
-    }
-
-    #[test]
-    fn write_draft_inserts_placeholder_for_empty_comment() {
-        let (_td, repo) = init_repo_with_commit("src/lib.rs", "fn main() {}\n");
-        write_draft(
-            &repo,
-            crate::git::DEFAULT_NOTES_REF,
-            None,
-            DraftWriteArgs {
-                file: "src/lib.rs",
-                file_comment: true,
-                line: None,
-                side: None,
-                print_path: false,
-            },
-        )
-        .expect("write draft");
-
-        let draft_path = draft_path(&repo).expect("draft path");
-        let content = std::fs::read_to_string(draft_path).expect("read draft");
-        assert!(content.contains(DRAFT_PLACEHOLDER));
-        assert!(content.contains("### File comment"));
     }
 
     fn init_repo_with_commit(path: &str, contents: &str) -> (tempfile::TempDir, gix::Repository) {

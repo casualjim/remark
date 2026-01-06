@@ -254,7 +254,7 @@ Create a project-local tasks file at `.zed/tasks.json` (in the repo root):
 [
   {
     "label": "remark: open draft",
-    "command": "path=$(remark draft) && zed \"$path\"",
+    "command": "gitdir=$(git rev-parse --git-dir) && zed \"$gitdir/remark/draft.md\"",
     "cwd": "$ZED_WORKTREE_ROOT"
   }
 ]
@@ -264,18 +264,56 @@ Notes:
 - Requires the `zed` CLI to be on your PATH. (you may need to symlink: `sudo ln -sf /usr/bin/zeditor /usr/bin/zed`)
 - The draft file is inside `.git`, so it won't show up in git status.
 
-To run the task, open the command palette and use **task: spawn**, then pick the
+To run the task, open the command palette and use **task: spawn** (Alt-Shift-T), then pick the
 `remark: open draft ...` entry.
+
+:notice: If the draft buffer has already been openened before, it won't pick up changes to the draft file. Use the command palette to reload the file: `editor: reload file`. 
 
 ## VS Code integration
 
-VS Code doesn’t start arbitrary language servers without an extension, and we
-don’t ship a VS Code extension yet. You can still use remark via the CLI and a
-task to open the draft.
+VS Code only starts language servers via extensions. This repo includes a VS
+Code extension at `vscode-extension/remark-lsp`.
+
+### Install the dev extension (maintainers)
+
+1) Open `vscode-extension/remark-lsp` in VS Code.
+2) Run `npm install` and `npm run compile` (or `npm run watch`).
+3) Press `F5` to launch the Extension Development Host.
+
+### Configure languages
+
+The extension starts `remark lsp` from your PATH by default. You can customize
+it via settings:
+
+- `remark.path`: explicit path to the `remark` binary.
+- `remark.lspArgs`: extra args passed to `remark lsp` (string or string array).
+- `remark.languages`: language ids to attach to (default: `["*"]` for all).
+
+You can also pass extra LSP flags via `REMARK_LSP_ARGS`, for example:
+
+```bash
+REMARK_LSP_ARGS="--no-inlay-hints" code
+```
+
+### Add comments from VS Code
+
+Use the light bulb (quick fixes) to add comments:
+
+- **Remark: Add line comment**
+- **Remark: Add file comment**
+
+This opens a multi-line editor panel (no escaping needed). Line comments always
+target the new side. The extension uses `remark add` so the CLI handles syncing.
 
 ### Draft workflow (tasks)
 
-Create a project-local tasks file at `.vscode/tasks.json`:
+Use the command palette for either:
+
+- **Remark: Open Draft** (command), or
+- **Tasks: Run Task** → `remark: open draft` (task)
+
+If you are not using the extension, create a project-local tasks file at
+`.vscode/tasks.json`:
 
 ```json
 {
@@ -285,18 +323,18 @@ Create a project-local tasks file at `.vscode/tasks.json`:
       "label": "remark: open draft",
       "type": "shell",
       "command": "bash",
-      "args": ["-lc", "code \"$(remark draft)\""]
+      "args": ["-lc", "gitdir=$(git rev-parse --git-dir) && code \"$gitdir/remark/draft.md\""]
     }
   ]
 }
 ```
 
 Notes:
-- Requires the `code` CLI to be on your PATH.
+- Requires the `code` CLI to be on your PATH (extension tasks do not).
 - The draft file is inside `.git`, so it won’t show up in git status.
 
 Workflow:
-1) Use `remark add --draft ...` to seed a comment (or edit the draft directly).
+1) Add comments via the quick fix UI or `remark add`.
 2) Run **Tasks: Run Task** → `remark: open draft`.
 3) Edit and save; `remark` will sync draft changes on the next command or prompt.
 

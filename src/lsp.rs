@@ -1,7 +1,10 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
+use ignore::WalkBuilder;
+use ignore::overrides::OverrideBuilder;
 use notify::{RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -24,6 +27,7 @@ const COMMAND_RESOLVE: &str = "remark.resolve";
 const COMMAND_UNRESOLVE: &str = "remark.unresolve";
 const COMMAND_ADD_DRAFT_COMMENT: &str = "remark.addDraftComment";
 const COMMAND_OPEN_PROMPT: &str = "remark.openPrompt";
+const DEFAULT_IGNORE_PATTERNS: &str = include_str!("../extra-ignores");
 
 pub fn run(
     repo_root: Option<PathBuf>,
@@ -141,14 +145,21 @@ impl Backend {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<FsWatchEvent>();
         let watch_root = root.clone();
         let watch_root_cb = watch_root.clone();
+        let gitdir = gix::open(&watch_root)
+            .ok()
+            .map(|repo| repo.path().to_path_buf());
+        let gitdir_cb = gitdir.clone();
         let sender = tx.clone();
         let mut watcher =
             match notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
                 Ok(event) => {
+                    if !should_sync_event(&event.kind) {
+                        return;
+                    }
                     if event
                         .paths
                         .iter()
-                        .any(|path| should_sync_path(&watch_root_cb, path))
+                        .any(|path| should_sync_path(&watch_root_cb, gitdir_cb.as_deref(), path))
                     {
                         let _ = sender.send(FsWatchEvent::Change);
                     }
@@ -234,6 +245,12 @@ impl Backend {
                 }
             }
         });
+    }
+
+    fn stop_fs_watcher(&self) {
+        if let Ok(mut guard) = self.fs_watcher.lock() {
+            let _ = guard.take();
+        }
     }
 
     fn to_repo_relative(&self, path: &Path) -> Option<String> {
@@ -548,20 +565,15 @@ impl Backend {
             }
         };
 
-        let cmd = crate::config::AddCli {
-            file: Some(file.clone()),
+        if let Err(err) = crate::add_cmd::write_draft_placeholder(
+            &repo,
+            &self.notes_ref,
+            self.base_ref.as_deref(),
+            &file,
             line,
             side,
             file_comment,
-            message: None,
-            edit: false,
-            editor: None,
-            draft: true,
-            apply: false,
-            print_path: false,
-        };
-
-        if let Err(err) = crate::add_cmd::run(&repo, &self.notes_ref, self.base_ref.clone(), cmd) {
+        ) {
             self.log_error(err).await;
         }
     }
@@ -693,20 +705,81 @@ fn sync_once(root: &Path, notes_ref: &str, base_ref: Option<&str>) -> Result<()>
     Ok(())
 }
 
-fn should_sync_path(root: &Path, path: &Path) -> bool {
+fn should_sync_event(kind: &notify::EventKind) -> bool {
+    use notify::event::EventKind;
+
+    !matches!(kind, EventKind::Access(_) | EventKind::Other)
+}
+
+fn default_ignore_file() -> &'static PathBuf {
+    static DEFAULT_IGNORE_FILE: OnceLock<PathBuf> = OnceLock::new();
+
+    DEFAULT_IGNORE_FILE.get_or_init(|| {
+        let ignore_path = std::env::temp_dir().join("remark-default-ignore");
+        let _ = std::fs::write(&ignore_path, DEFAULT_IGNORE_PATTERNS);
+        ignore_path
+    })
+}
+
+fn walker_includes_path(project_root: &Path, path: &Path) -> bool {
+    let mut ob = OverrideBuilder::new(project_root);
+    let candidate = match path.strip_prefix(project_root) {
+        Ok(rel) => rel,
+        Err(_) => path,
+    };
+    if ob.add(&candidate.to_string_lossy()).is_err() {
+        return false;
+    }
+    let overrides = match ob.build() {
+        Ok(o) => o,
+        Err(_) => return false,
+    };
+
+    let mut builder = WalkBuilder::new(project_root);
+    let default_ignore = default_ignore_file();
+    if default_ignore.exists() {
+        builder.add_ignore(default_ignore);
+    }
+    builder.overrides(overrides);
+
+    for entry in builder.build().flatten() {
+        if entry.path() == path {
+            return entry.file_type().is_some_and(|ft| ft.is_file());
+        }
+    }
+
+    false
+}
+
+fn should_sync_path(root: &Path, gitdir: Option<&Path>, path: &Path) -> bool {
     // Check if path is within root
-    if let (Ok(abs), Ok(root_abs)) = (std::fs::canonicalize(path), std::fs::canonicalize(root))
-        && !abs.starts_with(&root_abs)
+    let (abs, root_abs) = match (std::fs::canonicalize(path), std::fs::canonicalize(root)) {
+        (Ok(abs), Ok(root_abs)) => (abs, root_abs),
+        _ => return false,
+    };
+    if !abs.starts_with(&root_abs) {
+        return false;
+    }
+
+    if let Some(gitdir) = gitdir
+        && let Ok(git_abs) = std::fs::canonicalize(gitdir)
+        && abs.starts_with(&git_abs)
     {
         return false;
     }
 
     // Check if it's a regular file (not a directory or symlink)
     // This is much more efficient than walking the entire tree
-    match std::fs::metadata(path) {
-        Ok(metadata) => metadata.is_file(),
-        Err(_) => false,
+    let metadata = match std::fs::metadata(&abs) {
+        Ok(metadata) => metadata,
+        Err(_) => return false,
+    };
+
+    if !metadata.is_file() {
+        return false;
     }
+
+    walker_includes_path(&root_abs, &abs)
 }
 
 fn inlay_label(comment: &Comment, side: Option<LineSide>) -> String {
@@ -798,7 +871,7 @@ fn make_file_comment_action(file: &str, resolved: bool) -> CodeActionOrCommand {
         file_comment: true,
     };
     let cmd = Command {
-        title: title.clone(),
+        title: format!("Remark: {}", title),
         command: command.to_string(),
         arguments: Some(vec![serde_json::to_value(args).unwrap_or(Value::Null)]),
     };
@@ -963,6 +1036,7 @@ impl LanguageServer for Backend {
     }
 
     async fn shutdown(&self) -> LspResult<()> {
+        self.stop_fs_watcher();
         Ok(())
     }
 
@@ -1054,6 +1128,14 @@ impl LanguageServer for Backend {
         }
 
         Ok(None)
+    }
+}
+
+impl Drop for Backend {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.fs_watcher.lock() {
+            let _ = guard.take();
+        }
     }
 }
 

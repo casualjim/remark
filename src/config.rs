@@ -67,7 +67,6 @@ pub enum Command {
     Prompt(PromptCli),
     Resolve(ResolveCli),
     Add(AddCli),
-    Draft(DraftCli),
     New(NewCli),
     Purge(PurgeCli),
     Lsp(LspCli),
@@ -168,22 +167,7 @@ pub struct AddCli {
     /// Editor command to use with --edit (overrides $VISUAL/$EDITOR).
     #[arg(long = "editor")]
     pub editor: Option<String>,
-
-    /// Write a draft file for editing in-editor.
-    #[arg(long = "draft", action = ArgAction::SetTrue)]
-    pub draft: bool,
-
-    /// Apply the current draft file.
-    #[arg(long = "apply", action = ArgAction::SetTrue)]
-    pub apply: bool,
-
-    /// Print the draft path to stdout.
-    #[arg(long = "print-path", action = ArgAction::SetTrue)]
-    pub print_path: bool,
 }
-
-#[derive(Args, Debug, Clone, Default)]
-pub struct DraftCli {}
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct NewCli {}
