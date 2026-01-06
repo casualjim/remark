@@ -75,6 +75,10 @@ pub fn ensure_notes_ref(repo: &Repository, notes_ref: &str) -> Result<()> {
         return Ok(());
     };
 
+    if !remote_has_notes_ref(repo, &remote, notes_ref)? {
+        return Ok(());
+    }
+
     fetch_notes_ref(repo, &remote, notes_ref)
         .with_context(|| format!("fetch {notes_ref} from {remote}"))?;
 
@@ -164,6 +168,29 @@ fn fetch_notes_ref(repo: &Repository, remote: &str, notes_ref: &str) -> Result<(
     }
 
     Ok(())
+}
+
+fn remote_has_notes_ref(repo: &Repository, remote: &str, notes_ref: &str) -> Result<bool> {
+    let workdir = repo
+        .workdir()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| repo.git_dir().to_path_buf());
+
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(workdir)
+        .arg("ls-remote")
+        .arg("--refs")
+        .arg(remote)
+        .arg(notes_ref)
+        .output()
+        .context("spawn git ls-remote")?;
+
+    if !output.status.success() {
+        anyhow::bail!("git ls-remote failed");
+    }
+
+    Ok(!output.stdout.is_empty())
 }
 
 pub fn write_local_config_value(repo: &Repository, key: &str, value: &str) -> Result<()> {
