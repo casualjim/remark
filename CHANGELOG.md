@@ -1,8 +1,27 @@
+## [0.2.5] - 2026-01-06
+
+### 🚀 Features
+
+- Add vscode comment threads
+
+### 🐛 Bug Fixes
+
+- Optimize should_sync_path to eliminate expensive tree walks
+- Collapse nested if statements to satisfy clippy
+
+### ⚙️ Miscellaneous Tasks
+
+- Fix clippy lints in lsp.rs
 ## [0.2.4] - 2026-01-05
 
 ### 🐛 Bug Fixes
 
 - Restore draft sync and draft actions
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.2.4 [ci skip]
+- Release remark version 0.2.4
 ## [0.2.3] - 2026-01-05
 
 ### ⚙️ Miscellaneous Tasks
