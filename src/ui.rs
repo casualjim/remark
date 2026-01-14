@@ -446,11 +446,23 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
                     crate::diff::Kind::Context => ' ',
                     _ => ' ',
                 };
-                let diff_prefix_style = match r.kind {
+
+                // Only tint the gutter (diff prefix / margin), not the content.
+                let gutter_bg = match r.kind {
+                    crate::diff::Kind::Add if !is_new_file => Some(Color::Rgb(0, 50, 0)),
+                    crate::diff::Kind::Remove if !is_deleted_file => Some(Color::Rgb(60, 0, 0)),
+                    _ => None,
+                };
+
+                let mut diff_prefix_style = match r.kind {
                     crate::diff::Kind::Add => Style::default().fg(Color::Green),
                     crate::diff::Kind::Remove => Style::default().fg(Color::Red),
                     _ => Style::default().fg(Color::DarkGray),
                 };
+                if let Some(bg) = gutter_bg {
+                    diff_prefix_style = diff_prefix_style.bg(bg);
+                }
+
                 let old_s = r
                     .old_line
                     .map(|n| format!("{n:>old_w$}"))
@@ -463,20 +475,17 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
                 let mut spans: Vec<Span<'static>> = Vec::with_capacity(10 + r.spans.len());
                 spans.push(Span::styled(marker.to_string(), marker_style));
                 spans.push(Span::styled(diff_prefix.to_string(), diff_prefix_style));
-                spans.push(Span::raw(" "));
+                spans.push(match gutter_bg {
+                    Some(bg) => Span::styled(" ", Style::default().bg(bg)),
+                    None => Span::raw(" "),
+                });
                 spans.push(Span::styled(old_s, Style::default().fg(Color::DarkGray)));
                 spans.push(Span::raw(" "));
                 spans.push(Span::styled(new_s, Style::default().fg(Color::DarkGray)));
                 spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
                 spans.extend(r.spans.iter().cloned());
 
-                let mut style = match r.kind {
-                    crate::diff::Kind::Add if is_new_file => Style::default(),
-                    crate::diff::Kind::Remove if is_deleted_file => Style::default(),
-                    crate::diff::Kind::Add => Style::default().bg(Color::Rgb(0, 50, 0)),
-                    crate::diff::Kind::Remove => Style::default().bg(Color::Rgb(60, 0, 0)),
-                    _ => Style::default(),
-                };
+                let mut style = Style::default();
                 if abs_idx == s.diff_cursor {
                     style = style.add_modifier(Modifier::REVERSED);
                 }
@@ -521,13 +530,6 @@ fn render_side_by_side_line(
     is_deleted_file: bool,
     total_width: usize,
 ) -> Line<'static> {
-    fn tint(spans: &[Span<'static>], bg: Color) -> Vec<Span<'static>> {
-        spans
-            .iter()
-            .map(|s| Span::styled(s.content.to_string(), s.style.bg(bg)))
-            .collect()
-    }
-
     fn str_width(s: &str) -> usize {
         s.chars()
             .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
@@ -616,14 +618,8 @@ fn render_side_by_side_line(
         None
     };
 
-    let mut left_spans = row.left_spans.clone();
-    let mut right_spans = row.right_spans.clone();
-    if let Some(bg) = left_bg {
-        left_spans = tint(&left_spans, bg);
-    }
-    if let Some(bg) = right_bg {
-        right_spans = tint(&right_spans, bg);
-    }
+    let left_spans = row.left_spans.clone();
+    let right_spans = row.right_spans.clone();
 
     // Allocate fixed-width columns so the right side never "slides" into the left side.
     // Layout:
@@ -635,22 +631,13 @@ fn render_side_by_side_line(
     let left_code_w = avail / 2;
     let right_code_w = avail.saturating_sub(left_code_w);
 
-    let left_pad_style = match left_bg {
-        Some(bg) => Style::default().bg(bg),
-        None => Style::default(),
-    };
-    let right_pad_style = match right_bg {
-        Some(bg) => Style::default().bg(bg),
-        None => Style::default(),
-    };
-
     let (mut left_code, left_used) = spans_truncate_to_width(&left_spans, left_code_w);
     if left_used < left_code_w {
-        left_code.push(pad_spaces(left_code_w - left_used, left_pad_style));
+        left_code.push(pad_spaces(left_code_w - left_used, Style::default()));
     }
     let (mut right_code, right_used) = spans_truncate_to_width(&right_spans, right_code_w);
     if right_used < right_code_w {
-        right_code.push(pad_spaces(right_code_w - right_used, right_pad_style));
+        right_code.push(pad_spaces(right_code_w - right_used, Style::default()));
     }
 
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(16 + left_code.len() + right_code.len());
@@ -659,16 +646,32 @@ fn render_side_by_side_line(
 
     spans.push(Span::styled(old_s, Style::default().fg(Color::DarkGray)));
     spans.push(Span::raw(" "));
-    spans.push(Span::styled(left_prefix.to_string(), left_prefix_style));
-    spans.push(Span::raw(" "));
+    spans.push(Span::styled(
+        left_prefix.to_string(),
+        left_bg
+            .map(|bg| left_prefix_style.bg(bg))
+            .unwrap_or(left_prefix_style),
+    ));
+    spans.push(match left_bg {
+        Some(bg) => Span::styled(" ", Style::default().bg(bg)),
+        None => Span::raw(" "),
+    });
     spans.extend(left_code);
 
     spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
 
     spans.push(Span::styled(new_s, Style::default().fg(Color::DarkGray)));
     spans.push(Span::raw(" "));
-    spans.push(Span::styled(right_prefix.to_string(), right_prefix_style));
-    spans.push(Span::raw(" "));
+    spans.push(Span::styled(
+        right_prefix.to_string(),
+        right_bg
+            .map(|bg| right_prefix_style.bg(bg))
+            .unwrap_or(right_prefix_style),
+    ));
+    spans.push(match right_bg {
+        Some(bg) => Span::styled(" ", Style::default().bg(bg)),
+        None => Span::raw(" "),
+    });
     spans.extend(right_code);
 
     let mut style = Style::default();
