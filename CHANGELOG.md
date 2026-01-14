@@ -1,8 +1,18 @@
+## [0.2.7] - 2026-01-14
+
+### 🚀 Features
+
+- Only tint diff gutter, preserve syntax highlighting in content (#9)
 ## [0.2.6] - 2026-01-06
 
 ### 🐛 Bug Fixes
 
 - Skip fetching missing notes ref
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.2.6 [ci skip]
+- Release remark version 0.2.6
 ## [0.2.5] - 2026-01-06
 
 ### 🚀 Features
