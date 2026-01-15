@@ -37,9 +37,11 @@
 
 - Commit messages follow Conventional Commits (examples: `feat: ...`, `fix: ...`, `chore: ...`, `refactor: ...`, `test: ...`).
 - PRs should include: a clear description, rationale, and any user-facing behavior changes.
+- Release bump tokens are read from PR title/body: `bump:major`, `bump:minor`, or `bump:patch`. If none are present, the release defaults to `bump:patch`. If multiple tokens are present, the highest wins (major > minor > patch).
+- Agents creating PRs with the `gh` client must include the bump token in the PR body.
 - Ensure CI passes (`fmt`, `clippy`, `test`) before merging.
 - CRITICAL: Do not create commits unless the user explicitly asks. Always confirm before staging or committing changes.
 
 ## Release Notes (Maintainers)
 
-Releases are cut automatically after CI passes on pushes to `main`. The `Cut Release` workflow runs `git-cliff` to update `CHANGELOG.md` and then uses `cargo-release` to bump the patch version and tag `vX.Y.Z`. Pushing the tag triggers `cargo-dist` to publish GitHub Release artifacts. A repo secret named `RELEASE_TOKEN` is required so the tag push can trigger the `Release` workflow. There is no release PR flow.
+Releases are cut automatically after CI passes on pushes to `main`. The `Cut Release` workflow determines a bump level from the PR title/body (`bump:major`, `bump:minor`, `bump:patch`), defaulting to patch when absent. It computes the next version, runs `git-cliff` to update `CHANGELOG.md`, and uses `cargo-release` to tag `vX.Y.Z`. Pushing the tag triggers `cargo-dist` to publish GitHub Release artifacts. A repo secret named `RELEASE_TOKEN` is required so the tag push can trigger the `Release` workflow. There is no release PR flow.
