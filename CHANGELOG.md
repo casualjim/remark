@@ -1,8 +1,18 @@
+## [0.3.1] - 2026-01-15
+
+### 🚀 Features
+
+- [**breaking**] Use colored line numbers instead of +/- prefixes in diffs (#10)
 ## [0.2.7] - 2026-01-14
 
 ### 🚀 Features
 
 - Only tint diff gutter, preserve syntax highlighting in content (#9)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.2.7 [ci skip]
+- Release remark version 0.2.7
 ## [0.2.6] - 2026-01-06
 
 ### 🐛 Bug Fixes
