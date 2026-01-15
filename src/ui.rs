@@ -20,8 +20,8 @@ use tui_textarea::TextArea;
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::{
-    CommentListEntry, CommentLocator, CommentTarget, DiffViewMode, FileChangeKind, FileEntry,
-    Focus, Mode, RenderRow, SideBySideRow,
+    CommentListEntry, CommentLocator, CommentTarget, DiffViewMode, FileEntry, Focus, Mode,
+    RenderRow, SideBySideRow,
 };
 use crate::file_tree::FileTreeRow;
 use crate::git::ViewKind;
@@ -316,10 +316,6 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
     let old_w = old_max.to_string().len().max(4);
     let new_w = new_max.to_string().len().max(4);
 
-    let selected_change = s.files.get(s.file_selected).map(|e| e.change);
-    let is_new_file = matches!(selected_change, Some(FileChangeKind::Added));
-    let is_deleted_file = matches!(selected_change, Some(FileChangeKind::Deleted));
-
     let mut rendered: Vec<Line<'static>> = Vec::with_capacity(s.diff_rows.len());
     for (abs_idx, row) in s.diff_rows.iter().enumerate() {
         let path = s.files.get(s.file_selected).map(|e| e.path.as_str());
@@ -359,7 +355,6 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
             _ => None,
         };
 
-        let commentable = locator.is_some();
         let marker_state = match (path, locator) {
             (Some(p), Some(CommentLocator::File)) => s.review.file_comment(p).and_then(|c| {
                 if c.body.trim().is_empty() {
@@ -440,28 +435,16 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
                     Some(CommentState::ResolvedOnly) => ("✓ ", Style::default().fg(Color::Green)),
                     _ => ("  ", Style::default().fg(Color::Reset)),
                 };
-                let diff_prefix = match r.kind {
-                    crate::diff::Kind::Add => '+',
-                    crate::diff::Kind::Remove => '-',
-                    crate::diff::Kind::Context => ' ',
-                    _ => ' ',
-                };
 
-                // Only tint the gutter (diff prefix / margin), not the content.
-                let gutter_bg = match r.kind {
-                    crate::diff::Kind::Add if !is_new_file => Some(Color::Rgb(0, 50, 0)),
-                    crate::diff::Kind::Remove if !is_deleted_file => Some(Color::Rgb(60, 0, 0)),
-                    _ => None,
-                };
-
-                let mut diff_prefix_style = match r.kind {
-                    crate::diff::Kind::Add => Style::default().fg(Color::Green),
+                // Color line numbers instead of using +/-
+                let old_line_style = match r.kind {
                     crate::diff::Kind::Remove => Style::default().fg(Color::Red),
                     _ => Style::default().fg(Color::DarkGray),
                 };
-                if let Some(bg) = gutter_bg {
-                    diff_prefix_style = diff_prefix_style.bg(bg);
-                }
+                let new_line_style = match r.kind {
+                    crate::diff::Kind::Add => Style::default().fg(Color::Green),
+                    _ => Style::default().fg(Color::DarkGray),
+                };
 
                 let old_s = r
                     .old_line
@@ -472,16 +455,12 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
                     .map(|n| format!("{n:>new_w$}"))
                     .unwrap_or_else(|| " ".repeat(new_w));
 
-                let mut spans: Vec<Span<'static>> = Vec::with_capacity(10 + r.spans.len());
+                let mut spans: Vec<Span<'static>> = Vec::with_capacity(8 + r.spans.len());
                 spans.push(Span::styled(marker.to_string(), marker_style));
-                spans.push(Span::styled(diff_prefix.to_string(), diff_prefix_style));
-                spans.push(match gutter_bg {
-                    Some(bg) => Span::styled(" ", Style::default().bg(bg)),
-                    None => Span::raw(" "),
-                });
-                spans.push(Span::styled(old_s, Style::default().fg(Color::DarkGray)));
                 spans.push(Span::raw(" "));
-                spans.push(Span::styled(new_s, Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(old_s, old_line_style));
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(new_s, new_line_style));
                 spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
                 spans.extend(r.spans.iter().cloned());
 
@@ -495,7 +474,6 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
                 rendered.push(render_side_by_side_line(
                     r,
                     abs_idx == s.diff_cursor,
-                    commentable,
                     matches!(
                         marker_state,
                         Some(CommentState::HasUnresolved | CommentState::ResolvedOnly)
@@ -503,8 +481,6 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
                     matches!(marker_state, Some(CommentState::ResolvedOnly)),
                     old_w,
                     new_w,
-                    is_new_file,
-                    is_deleted_file,
                     inner.width as usize,
                 ));
             }
@@ -521,13 +497,10 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
 fn render_side_by_side_line(
     row: &SideBySideRow,
     selected: bool,
-    _commentable: bool,
     has_comment: bool,
     comment_resolved: bool,
     old_w: usize,
     new_w: usize,
-    is_new_file: bool,
-    is_deleted_file: bool,
     total_width: usize,
 ) -> Line<'static> {
     fn str_width(s: &str) -> usize {
@@ -576,6 +549,15 @@ fn render_side_by_side_line(
         ("  ", Style::default().fg(Color::Reset))
     };
 
+    let old_line_style = match row.left_kind {
+        Some(crate::diff::Kind::Remove) => Style::default().fg(Color::Red),
+        _ => Style::default().fg(Color::DarkGray),
+    };
+    let new_line_style = match row.right_kind {
+        Some(crate::diff::Kind::Add) => Style::default().fg(Color::Green),
+        _ => Style::default().fg(Color::DarkGray),
+    };
+
     let old_s = row
         .old_line
         .map(|n| format!("{n:>old_w$}"))
@@ -585,48 +567,15 @@ fn render_side_by_side_line(
         .map(|n| format!("{n:>new_w$}"))
         .unwrap_or_else(|| " ".repeat(new_w));
 
-    let left_prefix = match row.left_kind {
-        Some(crate::diff::Kind::Remove) => '-',
-        Some(crate::diff::Kind::Context) => ' ',
-        _ => ' ',
-    };
-    let right_prefix = match row.right_kind {
-        Some(crate::diff::Kind::Add) => '+',
-        Some(crate::diff::Kind::Context) => ' ',
-        _ => ' ',
-    };
-
-    let left_prefix_style = match row.left_kind {
-        Some(crate::diff::Kind::Remove) => Style::default().fg(Color::Red),
-        Some(crate::diff::Kind::Context) => Style::default().fg(Color::DarkGray),
-        _ => Style::default().fg(Color::DarkGray),
-    };
-    let right_prefix_style = match row.right_kind {
-        Some(crate::diff::Kind::Add) => Style::default().fg(Color::Green),
-        Some(crate::diff::Kind::Context) => Style::default().fg(Color::DarkGray),
-        _ => Style::default().fg(Color::DarkGray),
-    };
-
-    let left_bg = if !is_deleted_file && matches!(row.left_kind, Some(crate::diff::Kind::Remove)) {
-        Some(Color::Rgb(60, 0, 0))
-    } else {
-        None
-    };
-    let right_bg = if !is_new_file && matches!(row.right_kind, Some(crate::diff::Kind::Add)) {
-        Some(Color::Rgb(0, 50, 0))
-    } else {
-        None
-    };
-
     let left_spans = row.left_spans.clone();
     let right_spans = row.right_spans.clone();
 
     // Allocate fixed-width columns so the right side never "slides" into the left side.
     // Layout:
-    //   marker + sp + oldnum + sp + prefix + sp + leftcode + sp + │ + sp + newnum + sp + prefix + sp + rightcode
-    let fixed_left = str_width(marker) + 1 + old_w + 1 + 1 + 1;
+    //   marker + sp + oldnum + sp + leftcode + sp + │ + sp + newnum + sp + rightcode
+    let fixed_left = str_width(marker) + 1 + old_w + 1;
     let fixed_sep = 3usize; // " │ "
-    let fixed_right = new_w + 1 + 1 + 1;
+    let fixed_right = new_w + 1;
     let avail = total_width.saturating_sub(fixed_left + fixed_sep + fixed_right);
     let left_code_w = avail / 2;
     let right_code_w = avail.saturating_sub(left_code_w);
@@ -640,38 +589,18 @@ fn render_side_by_side_line(
         right_code.push(pad_spaces(right_code_w - right_used, Style::default()));
     }
 
-    let mut spans: Vec<Span<'static>> = Vec::with_capacity(16 + left_code.len() + right_code.len());
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(12 + left_code.len() + right_code.len());
     spans.push(Span::styled(marker.to_string(), marker_style));
     spans.push(Span::raw(" "));
 
-    spans.push(Span::styled(old_s, Style::default().fg(Color::DarkGray)));
+    spans.push(Span::styled(old_s, old_line_style));
     spans.push(Span::raw(" "));
-    spans.push(Span::styled(
-        left_prefix.to_string(),
-        left_bg
-            .map(|bg| left_prefix_style.bg(bg))
-            .unwrap_or(left_prefix_style),
-    ));
-    spans.push(match left_bg {
-        Some(bg) => Span::styled(" ", Style::default().bg(bg)),
-        None => Span::raw(" "),
-    });
     spans.extend(left_code);
 
     spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
 
-    spans.push(Span::styled(new_s, Style::default().fg(Color::DarkGray)));
+    spans.push(Span::styled(new_s, new_line_style));
     spans.push(Span::raw(" "));
-    spans.push(Span::styled(
-        right_prefix.to_string(),
-        right_bg
-            .map(|bg| right_prefix_style.bg(bg))
-            .unwrap_or(right_prefix_style),
-    ));
-    spans.push(match right_bg {
-        Some(bg) => Span::styled(" ", Style::default().bg(bg)),
-        None => Span::raw(" "),
-    });
     spans.extend(right_code);
 
     let mut style = Style::default();

@@ -387,11 +387,6 @@ pub(crate) enum SyncAction {
     NotesFromDraft,
 }
 
-pub(crate) enum DraftSyncMode {
-    Passive,
-    OnSave,
-}
-
 pub(crate) struct SyncReport {
     pub(crate) draft_updated: bool,
 }
@@ -401,7 +396,7 @@ pub(crate) fn sync_draft_notes(
     notes_ref: &str,
     base_ref: Option<&str>,
 ) -> Result<SyncReport> {
-    sync_draft_notes_with_mode(repo, notes_ref, base_ref, DraftSyncMode::Passive)
+    sync_draft_notes_with_mode(repo, notes_ref, base_ref)
 }
 
 pub(crate) fn sync_draft_notes_on_save(
@@ -409,14 +404,13 @@ pub(crate) fn sync_draft_notes_on_save(
     notes_ref: &str,
     base_ref: Option<&str>,
 ) -> Result<SyncReport> {
-    sync_draft_notes_with_mode(repo, notes_ref, base_ref, DraftSyncMode::OnSave)
+    sync_draft_notes_with_mode(repo, notes_ref, base_ref)
 }
 
 fn sync_draft_notes_with_mode(
     repo: &gix::Repository,
     notes_ref: &str,
     base_ref: Option<&str>,
-    _mode: DraftSyncMode,
 ) -> Result<SyncReport> {
     ensure_draft_exists(repo, notes_ref, base_ref)?;
 
@@ -1376,8 +1370,7 @@ Old note
         review.set_file_comment("src/lib.rs", "note".to_string());
         write_draft_from_review(&repo, notes_ref, None, &review).expect("write draft");
 
-        let report = sync_draft_notes_with_mode(&repo, notes_ref, None, DraftSyncMode::Passive)
-            .expect("sync");
+        let report = sync_draft_notes_with_mode(&repo, notes_ref, None).expect("sync");
         assert!(!report.draft_updated);
     }
 
@@ -1393,8 +1386,7 @@ Old note
 
         write_draft_file_comment(&repo, None, "src/lib.rs", "draft");
 
-        let report = sync_draft_notes_with_mode(&repo, notes_ref, None, DraftSyncMode::Passive)
-            .expect("sync");
+        let report = sync_draft_notes_with_mode(&repo, notes_ref, None).expect("sync");
         assert!(!report.draft_updated);
         let notes = load_file_review(&repo, notes_ref, "src/lib.rs")
             .expect("load notes")
@@ -1415,7 +1407,7 @@ Old note
 
         write_notes_file_comment(&repo, notes_ref, "src/lib.rs", "after");
 
-        sync_draft_notes_with_mode(&repo, notes_ref, None, DraftSyncMode::Passive).expect("sync");
+        sync_draft_notes_with_mode(&repo, notes_ref, None).expect("sync");
         let draft_review =
             load_draft_review(&draft_path(&repo).expect("draft path")).expect("load draft");
         assert_eq!(draft_review.file_comment("src/lib.rs"), Some("after"));
@@ -1436,8 +1428,7 @@ Old note
         meta.draft_hash = Some("deadbeef".to_string());
         write_draft_meta(&draft_meta_path(&repo).expect("meta path"), &meta).expect("write meta");
 
-        let report = sync_draft_notes_with_mode(&repo, notes_ref, None, DraftSyncMode::Passive)
-            .expect("sync");
+        let report = sync_draft_notes_with_mode(&repo, notes_ref, None).expect("sync");
         assert!(!report.draft_updated);
     }
 
@@ -1455,8 +1446,7 @@ Old note
         write_notes_file_comment(&repo, notes_ref, "src/lib.rs", "notes-new");
         set_draft_mtime_relative(&repo, notes_ref, 10);
 
-        let report = sync_draft_notes_with_mode(&repo, notes_ref, None, DraftSyncMode::Passive)
-            .expect("sync");
+        let report = sync_draft_notes_with_mode(&repo, notes_ref, None).expect("sync");
         assert!(!report.draft_updated);
 
         let notes = load_file_review(&repo, notes_ref, "src/lib.rs")
@@ -1480,7 +1470,7 @@ Old note
         write_notes_file_comment(&repo, notes_ref, "src/lib.rs", "notes-new");
         set_draft_mtime_relative(&repo, notes_ref, -10);
 
-        sync_draft_notes_with_mode(&repo, notes_ref, None, DraftSyncMode::Passive).expect("sync");
+        sync_draft_notes_with_mode(&repo, notes_ref, None).expect("sync");
 
         let draft_review =
             load_draft_review(&draft_path(&repo).expect("draft path")).expect("load draft");
@@ -1500,8 +1490,7 @@ Old note
         let empty_review = Review::new();
         write_draft_review(&repo, None, &empty_review);
 
-        let report = sync_draft_notes_with_mode(&repo, notes_ref, None, DraftSyncMode::Passive)
-            .expect("sync");
+        let report = sync_draft_notes_with_mode(&repo, notes_ref, None).expect("sync");
         assert!(!report.draft_updated);
         assert!(
             load_file_review(&repo, notes_ref, "src/lib.rs")
@@ -1522,7 +1511,7 @@ Old note
 
         persist_file_review(&repo, notes_ref, "src/lib.rs", None).expect("remove note");
 
-        sync_draft_notes_with_mode(&repo, notes_ref, None, DraftSyncMode::Passive).expect("sync");
+        sync_draft_notes_with_mode(&repo, notes_ref, None).expect("sync");
         let draft_review =
             load_draft_review(&draft_path(&repo).expect("draft path")).expect("load draft");
         assert!(draft_review.file_comment("src/lib.rs").is_none());
@@ -1547,7 +1536,7 @@ Old note
         meta.lines.clear();
         write_draft_meta(&draft_meta_path(&repo).expect("meta path"), &meta).expect("write meta");
 
-        sync_draft_notes_with_mode(&repo, notes_ref, None, DraftSyncMode::Passive).expect("sync");
+        sync_draft_notes_with_mode(&repo, notes_ref, None).expect("sync");
         let draft_review =
             load_draft_review(&draft_path(&repo).expect("draft path")).expect("load draft");
         assert_eq!(
@@ -1577,7 +1566,7 @@ Old note
             "fn main() { println!(\"hi\"); }\n",
         )
         .expect("write updated file");
-        sync_draft_notes_with_mode(&repo, notes_ref, None, DraftSyncMode::Passive).expect("sync");
+        sync_draft_notes_with_mode(&repo, notes_ref, None).expect("sync");
         let draft_review =
             load_draft_review(&draft_path(&repo).expect("draft path")).expect("load draft");
         assert!(
@@ -1615,8 +1604,7 @@ Old note
         let empty_review = Review::new();
         write_draft_review(&repo, None, &empty_review);
 
-        let report = sync_draft_notes_with_mode(&repo, notes_ref, None, DraftSyncMode::Passive)
-            .expect("sync");
+        let report = sync_draft_notes_with_mode(&repo, notes_ref, None).expect("sync");
         assert!(!report.draft_updated);
         assert!(
             load_file_review(&repo, notes_ref, "src/lib.rs")
