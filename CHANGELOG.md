@@ -1,8 +1,15 @@
+## [0.3.3] - 2026-01-15
+
+### ⚙️ Miscellaneous Tasks
+
+- Update release bump flow and docs
 ## [0.3.2] - 2026-01-15
 
 ### ⚙️ Miscellaneous Tasks
 
 - Configure homebrew tap publishing
+- Update changelog for v0.3.2 [ci skip]
+- Release remark version 0.3.2
 ## [0.3.1] - 2026-01-15
 
 ### 🚀 Features
