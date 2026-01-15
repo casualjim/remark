@@ -1,8 +1,18 @@
+## [0.3.2] - 2026-01-15
+
+### ⚙️ Miscellaneous Tasks
+
+- Configure homebrew tap publishing
 ## [0.3.1] - 2026-01-15
 
 ### 🚀 Features
 
 - [**breaking**] Use colored line numbers instead of +/- prefixes in diffs (#10)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.3.1 [ci skip]
+- Release remark version 0.3.1
 ## [0.2.7] - 2026-01-14
 
 ### 🚀 Features
