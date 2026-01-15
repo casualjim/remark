@@ -19,6 +19,10 @@ install-path = "CARGO_HOME"
 hosting = "github"
 # Whether to install an updater program
 install-updater = true
+# Homebrew tap for publishing formulae
+tap = "casualjim/homebrew-taps"
+# Publish jobs
+publish-jobs = ["homebrew"]
 
 [dist.github-custom-runners]
 # Use a modern Ubuntu runner for global and linux builds.
