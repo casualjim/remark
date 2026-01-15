@@ -1546,7 +1546,7 @@ impl App {
 
         let mut rows = match self.effective_diff_view_mode() {
             DiffViewMode::Unified => self.build_unified_rows(&path, &diff_lines, &raw)?,
-            DiffViewMode::SideBySide => self.build_side_by_side_rows(&path, &diff_lines, &raw)?,
+            DiffViewMode::SideBySide => self.build_side_by_side_rows(&path, &diff_lines)?,
         };
 
         rows.insert(0, RenderRow::FileHeader { path: path.clone() });
@@ -2406,7 +2406,6 @@ impl App {
         &self,
         path: &str,
         diff_lines: &[crate::diff::Line],
-        _raw: &str,
     ) -> Result<Vec<RenderRow>> {
         struct Temp {
             left_code: Option<String>,
