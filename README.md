@@ -268,7 +268,7 @@ Notes:
 To run the task, open the command palette and use **task: spawn** (Alt-Shift-T), then pick the
 `remark: open draft ...` entry.
 
-:notice: If the draft buffer has already been openened before, it won't pick up changes to the draft file. Use the command palette to reload the file: `editor: reload file`. 
+:notice: If the draft buffer has already been openened before, it won't pick up changes to the draft file. Use the command palette to reload the file: `editor: reload file`.
 
 ## VS Code integration
 
