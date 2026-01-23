@@ -18,9 +18,10 @@ Terminal-first code review notes for Git repos.
   - `staged`: HEAD → index
   - `unstaged`: index → worktree
   - `base`: merge-base(base, HEAD) → HEAD
-- **Diff modes** (toggle with `i`)
-  - Unified (“stacked”)
+- **Diff modes** (cycle with `i`)
+  - Decorated (default): full file with git status markers (`+`, `-`, ` `) like `bat`/`scat`
   - Side-by-side (only for modified files; added/deleted fall back to unified)
+  - Unified ("stacked")
   - Mode persists in `.git/config` as `remark.diffView`
 - **Per-file syntax highlighting** on diff code lines using `syntastica` + `hyperpolyglot` language detection.
 - **Comment markers**: unresolved comments show `💬` and resolved comments show `✓`.
@@ -267,7 +268,7 @@ Notes:
 To run the task, open the command palette and use **task: spawn** (Alt-Shift-T), then pick the
 `remark: open draft ...` entry.
 
-:notice: If the draft buffer has already been openened before, it won't pick up changes to the draft file. Use the command palette to reload the file: `editor: reload file`. 
+:notice: If the draft buffer has already been openened before, it won't pick up changes to the draft file. Use the command palette to reload the file: `editor: reload file`.
 
 ## VS Code integration
 
@@ -344,7 +345,8 @@ Workflow:
 
 - `h` / `l` or `←` / `→`: switch focus between **Files** and **Diff**
 - `1` / `2` / `3` / `4`: switch view **all / unstaged / staged / base**
-- `i`: toggle diff mode **unified ↔ side-by-side**
+- `i`: cycle diff mode **decorated → side-by-side → unified**
+- `H`: show/hide diff popup (unified hunk for current cursor position)
 - `R`: reload file list
 - `↑` / `↓`, `j` / `k`: move selection (focused pane)
 - `PgUp` / `PgDn`, `Ctrl+U` / `Ctrl+D`: page up/down (focused pane)
