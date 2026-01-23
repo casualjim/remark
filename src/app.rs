@@ -15,7 +15,6 @@ use crate::highlight::Highlighter;
 use crate::review::{FileReview, LineKey, LineSide, Review};
 use unicode_width::UnicodeWidthStr;
 
-const CONFIG_DIFF_VIEW_KEY: &str = "remark.diffView";
 const CONFIG_DIFF_CONTEXT_KEY: &str = "remark.diffContext";
 const DEFAULT_DIFF_CONTEXT: u32 = 3;
 const MIN_DIFF_CONTEXT: u32 = 0;
@@ -78,8 +77,17 @@ pub(crate) struct DiffRow {
     pub(crate) spans: Vec<ratatui::text::Span<'static>>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct DecoratedRow {
+    pub(crate) status: crate::diff::LineStatus,
+    pub(crate) line_number: u32,
+    pub(crate) old_line_number: Option<u32>,
+    pub(crate) spans: Vec<ratatui::text::Span<'static>>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DiffViewMode {
+    Decorated,
     Unified,
     SideBySide,
 }
@@ -100,6 +108,7 @@ pub(crate) enum RenderRow {
     Section { text: String },
     Unified(DiffRow),
     SideBySide(SideBySideRow),
+    Decorated(DecoratedRow),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -362,14 +371,8 @@ impl App {
         jump_target: Option<JumpTarget>,
     ) -> Result<Self> {
         let highlighter = Highlighter::new()?;
-        let diff_view_mode = match crate::git::read_local_config_value(&repo, CONFIG_DIFF_VIEW_KEY)
-            .ok()
-            .flatten()
-            .as_deref()
-        {
-            Some(v) => parse_diff_view_mode(v).unwrap_or(DiffViewMode::Unified),
-            None => DiffViewMode::Unified,
-        };
+        // Always default to Decorated view; users can switch with 'd' key
+        let diff_view_mode = DiffViewMode::Decorated;
         let diff_context = match crate::git::read_local_config_value(&repo, CONFIG_DIFF_CONTEXT_KEY)
             .ok()
             .flatten()
@@ -1545,6 +1548,9 @@ impl App {
             + "\n";
 
         let mut rows = match self.effective_diff_view_mode() {
+            DiffViewMode::Decorated => {
+                self.build_decorated_rows(&path, before.as_deref(), after.as_deref())?
+            }
             DiffViewMode::Unified => self.build_unified_rows(&path, &diff_lines, &raw)?,
             DiffViewMode::SideBySide => self.build_side_by_side_rows(&path, &diff_lines)?,
         };
@@ -1555,7 +1561,12 @@ impl App {
         self.diff_cursor = self
             .diff_rows
             .iter()
-            .position(|r| matches!(r, RenderRow::Unified(_) | RenderRow::SideBySide(_)))
+            .position(|r| {
+                matches!(
+                    r,
+                    RenderRow::Unified(_) | RenderRow::SideBySide(_) | RenderRow::Decorated(_)
+                )
+            })
             .unwrap_or(0);
         self.diff_scroll = 0;
         self.recompute_diff_metrics(self.diff_viewport_width);
@@ -1605,6 +1616,11 @@ impl App {
     }
 
     fn effective_diff_view_mode(&self) -> DiffViewMode {
+        // Decorated mode handles all file types (added, deleted, modified)
+        if self.diff_view_mode == DiffViewMode::Decorated {
+            return DiffViewMode::Decorated;
+        }
+
         let change = self.files.get(self.file_selected).map(|e| e.change);
         match change {
             Some(FileChangeKind::Added | FileChangeKind::Deleted) => DiffViewMode::Unified,
@@ -1800,6 +1816,26 @@ impl App {
                     s
                 }
                 RenderRow::SideBySide(_) => String::new(),
+                RenderRow::Decorated(r) => {
+                    let git_marker = match r.status {
+                        crate::diff::LineStatus::Unchanged => ' ',
+                        crate::diff::LineStatus::Added => '+',
+                        crate::diff::LineStatus::Removed => '-',
+                        crate::diff::LineStatus::Modified => '~',
+                    };
+                    let line_s = if r.line_number > 0 {
+                        format!("{:>new_w$}", r.line_number)
+                    } else {
+                        " ".repeat(new_w)
+                    };
+                    let code = r
+                        .spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>();
+                    // Marker is fixed-width (2 cells).
+                    format!("  {line_s} {git_marker} │ {code}")
+                }
                 RenderRow::Unified(r) => {
                     let diff_prefix = match r.kind {
                         crate::diff::Kind::Add => '+',
@@ -1871,6 +1907,21 @@ impl App {
                     CommentLocator::Line {
                         side: LineSide::Old,
                         line: r.old_line?,
+                    }
+                } else {
+                    return None;
+                }
+            }
+            RenderRow::Decorated(r) => {
+                if r.line_number > 0 {
+                    CommentLocator::Line {
+                        side: LineSide::New,
+                        line: r.line_number,
+                    }
+                } else if let Some(old_line) = r.old_line_number {
+                    CommentLocator::Line {
+                        side: LineSide::Old,
+                        line: old_line,
                     }
                 } else {
                     return None;
@@ -1984,6 +2035,10 @@ impl App {
                     ) && r.new_line.is_some())
                         || (matches!(r.left_kind, Some(crate::diff::Kind::Remove))
                             && r.old_line.is_some())
+                }
+                RenderRow::Decorated(r) => {
+                    // Can comment on any line with a valid line number
+                    r.line_number > 0 || r.old_line_number.is_some()
                 }
                 RenderRow::Section { .. } => false,
             };
@@ -2151,24 +2206,9 @@ fn merge_file_review(target: &mut FileReview, incoming: FileReview) {
     }
 }
 
-fn parse_diff_view_mode(raw: &str) -> Option<DiffViewMode> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "side-by-side" | "side_by_side" | "side" => Some(DiffViewMode::SideBySide),
-        "unified" => Some(DiffViewMode::Unified),
-        _ => None,
-    }
-}
-
 fn parse_diff_context(raw: &str) -> Option<u32> {
     let parsed = raw.trim().parse::<u32>().ok()?;
     Some(parsed.clamp(MIN_DIFF_CONTEXT, MAX_DIFF_CONTEXT))
-}
-
-fn diff_view_mode_value(mode: DiffViewMode) -> &'static str {
-    match mode {
-        DiffViewMode::Unified => "unified",
-        DiffViewMode::SideBySide => "side-by-side",
-    }
 }
 
 impl App {
@@ -2253,13 +2293,15 @@ impl App {
         let keep_new_line = self.diff_rows.get(self.diff_cursor).and_then(|r| match r {
             RenderRow::Unified(r) => r.new_line,
             RenderRow::SideBySide(r) => r.new_line,
+            RenderRow::Decorated(r) => Some(r.line_number),
             RenderRow::Section { .. } => None,
             RenderRow::FileHeader { .. } => None,
         });
 
         self.diff_view_mode = match self.diff_view_mode {
-            DiffViewMode::Unified => DiffViewMode::SideBySide,
+            DiffViewMode::Decorated => DiffViewMode::SideBySide,
             DiffViewMode::SideBySide => DiffViewMode::Unified,
+            DiffViewMode::Unified => DiffViewMode::Decorated,
         };
 
         self.reload_diff_for_selected()?;
@@ -2268,19 +2310,12 @@ impl App {
             && let Some(idx) = self.diff_rows.iter().position(|r| match r {
                 RenderRow::Unified(r) => r.new_line == Some(n),
                 RenderRow::SideBySide(r) => r.new_line == Some(n),
+                RenderRow::Decorated(r) => r.line_number == n,
                 RenderRow::Section { .. } => false,
                 RenderRow::FileHeader { .. } => false,
             })
         {
             self.diff_cursor = idx;
-        }
-
-        if let Err(e) = crate::git::write_local_config_value(
-            &self.repo,
-            CONFIG_DIFF_VIEW_KEY,
-            diff_view_mode_value(self.diff_view_mode),
-        ) {
-            self.status = format!("Failed to save diff view: {e}");
         }
 
         Ok(())
@@ -2333,13 +2368,8 @@ impl App {
         &self,
         path: &str,
         diff_lines: &[crate::diff::Line],
-        raw: &str,
+        _raw: &str,
     ) -> Result<Vec<RenderRow>> {
-        let mut diff_hl = self.highlighter.highlight_diff(raw)?;
-        if diff_hl.len() > diff_lines.len() {
-            diff_hl.truncate(diff_lines.len());
-        }
-
         let lang = self.highlighter.detect_file_lang(&self.repo, path);
         let mut code_block = String::new();
         let mut code_map: Vec<(usize, usize)> = Vec::new(); // (diff_idx, code_idx)
@@ -2380,16 +2410,22 @@ impl App {
 
             let spans = match dl.kind {
                 crate::diff::Kind::Context | crate::diff::Kind::Add | crate::diff::Kind::Remove => {
-                    code_by_diff[idx].clone().unwrap_or_else(|| {
-                        vec![ratatui::text::Span::raw(
-                            dl.text.get(1..).unwrap_or("").to_string(),
-                        )]
-                    })
+                    // Merge inline emphasis with syntax highlighting
+                    if let Some(inline_spans) = &dl.inline_spans {
+                        let syntax_spans = code_by_diff[idx].as_deref();
+                        Self::merge_inline_with_syntax(inline_spans, syntax_spans, dl.kind)
+                    } else {
+                        code_by_diff[idx].clone().unwrap_or_else(|| {
+                            vec![ratatui::text::Span::raw(
+                                dl.text.get(1..).unwrap_or("").to_string(),
+                            )]
+                        })
+                    }
                 }
-                _ => diff_hl
-                    .get(idx)
-                    .cloned()
-                    .unwrap_or_else(|| vec![ratatui::text::Span::raw(dl.text.clone())]),
+                _ => {
+                    // File headers
+                    vec![ratatui::text::Span::raw(dl.text.clone())]
+                }
             };
             rows.push(RenderRow::Unified(DiffRow {
                 kind: dl.kind,
@@ -2402,6 +2438,32 @@ impl App {
         Ok(rows)
     }
 
+    // Merge inline emphasis with syntax highlighting
+    fn merge_inline_with_syntax(
+        _inline_spans: &[crate::diff::InlineSpan],
+        syntax_spans: Option<&[ratatui::text::Span<'static>]>,
+        kind: crate::diff::Kind,
+    ) -> Vec<ratatui::text::Span<'static>> {
+        use ratatui::style::Color;
+
+        // Base style based on diff kind (no emphasis, just color)
+        let base_color = match kind {
+            crate::diff::Kind::Remove => Color::Red,
+            crate::diff::Kind::Add => Color::Green,
+            _ => return vec![ratatui::text::Span::raw("")],
+        };
+
+        // If we have syntax highlighting, use it as-is
+        if let Some(syntax) = syntax_spans {
+            return syntax.to_vec();
+        }
+
+        // No syntax highlighting, just return spans with base color
+        // Reconstruct text from inline spans without emphasis
+        let text = _inline_spans.iter().map(|s| s.text.as_str()).collect::<String>();
+        vec![ratatui::text::Span::styled(text, ratatui::style::Style::default().fg(base_color))]
+    }
+
     fn build_side_by_side_rows(
         &self,
         path: &str,
@@ -2410,6 +2472,8 @@ impl App {
         struct Temp {
             left_code: Option<String>,
             right_code: Option<String>,
+            left_inline: Option<Vec<crate::diff::InlineSpan>>,
+            right_inline: Option<Vec<crate::diff::InlineSpan>>,
         }
 
         let mut rows: Vec<RenderRow> = Vec::new();
@@ -2439,6 +2503,8 @@ impl App {
                     temps.push(Some(Temp {
                         left_code: Some(code.clone()),
                         right_code: Some(code),
+                        left_inline: None,
+                        right_inline: None,
                     }));
                     i += 1;
                 }
@@ -2479,6 +2545,8 @@ impl App {
                         temps.push(Some(Temp {
                             left_code,
                             right_code,
+                            left_inline: left.and_then(|l| l.inline_spans.clone()),
+                            right_inline: right.and_then(|l| l.inline_spans.clone()),
                         }));
                     }
                 }
@@ -2521,16 +2589,87 @@ impl App {
         for (row_idx, line_idx) in left_map {
             if let Some(line) = left_hl.get(line_idx).cloned()
                 && let RenderRow::SideBySide(r) = &mut rows[row_idx]
+                && let Some(t) = &temps[row_idx]
             {
-                r.left_spans = line;
+                if let Some(inline) = &t.left_inline {
+                    r.left_spans = Self::merge_inline_with_syntax(inline, Some(&line), crate::diff::Kind::Remove);
+                } else {
+                    r.left_spans = line;
+                }
             }
         }
         for (row_idx, line_idx) in right_map {
             if let Some(line) = right_hl.get(line_idx).cloned()
                 && let RenderRow::SideBySide(r) = &mut rows[row_idx]
+                && let Some(t) = &temps[row_idx]
             {
-                r.right_spans = line;
+                if let Some(inline) = &t.right_inline {
+                    r.right_spans = Self::merge_inline_with_syntax(inline, Some(&line), crate::diff::Kind::Add);
+                } else {
+                    r.right_spans = line;
+                }
             }
+        }
+
+        Ok(rows)
+    }
+
+    fn build_decorated_rows(
+        &self,
+        path: &str,
+        before: Option<&str>,
+        after: Option<&str>,
+    ) -> Result<Vec<RenderRow>> {
+        let decorated_lines = crate::diff::decorated_file_diff(before, after)?;
+
+        // For syntax highlighting, we need to highlight the visible content
+        // For deleted files, highlight old content. For others, highlight new content.
+        let (syntax_content, is_deleted) = if after.is_some() {
+            (after.unwrap(), false)
+        } else {
+            (before.unwrap(), true)
+        };
+
+        let lang = self.highlighter.detect_file_lang(&self.repo, path);
+        let syntax_hl = match lang {
+            Some(lang) => self.highlighter.highlight_lang(lang, syntax_content)?,
+            None => Vec::new(),
+        };
+
+        let mut rows = Vec::with_capacity(decorated_lines.len());
+
+        for dl in decorated_lines {
+            // Get syntax spans for this line
+            let syntax = if dl.line_number > 0 {
+                // For added/modified/unchanged lines in the new file
+                syntax_hl.get((dl.line_number - 1) as usize)
+            } else if is_deleted {
+                // For lines in a deleted file, use old_line_number
+                dl.old_line_number
+                    .and_then(|n| syntax_hl.get((n - 1) as usize))
+            } else {
+                // For removed lines in a modified file - no direct syntax mapping
+                None
+            };
+
+            // Determine the diff kind for styling (unused now, kept for potential future use)
+            let _diff_kind = match dl.status {
+                crate::diff::LineStatus::Added => crate::diff::Kind::Add,
+                crate::diff::LineStatus::Removed => crate::diff::Kind::Remove,
+                crate::diff::LineStatus::Modified => crate::diff::Kind::Add,
+                crate::diff::LineStatus::Unchanged => crate::diff::Kind::Context,
+            };
+
+            let spans = syntax.cloned().unwrap_or_else(|| {
+                vec![ratatui::text::Span::raw(dl.text.clone())]
+            });
+
+            rows.push(RenderRow::Decorated(DecoratedRow {
+                status: dl.status,
+                line_number: dl.line_number,
+                old_line_number: dl.old_line_number,
+                spans,
+            }));
         }
 
         Ok(rows)
@@ -2661,7 +2800,7 @@ mod tests {
             view: ViewKind::All,
             focus: Focus::Files,
             mode: Mode::Browse,
-            diff_view_mode: DiffViewMode::Unified,
+            diff_view_mode: DiffViewMode::Decorated,
             diff_context: DEFAULT_DIFF_CONTEXT,
             head_commit_oid: None,
             review: Review::new(),

@@ -35,7 +35,6 @@ dirs = "6"
 gix = { version = "0.77", features = ["revision", "tree-editor"] }
 gix-actor = "0.37.0"
 gix-date = "0.12.0"
-gix-diff = "0.57.0"
 gix-dir = "0.19.0"
 gix-hash = "0.21"
 gix-object = "0.54.0"
@@ -47,6 +46,7 @@ notify = "8"
 ratatui = "0.29"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+similar = { version = "2.7", features = ["text", "inline", "unicode"] }
 smallvec = "1"
 syntastica = "0.6"
 syntastica-parsers = { version = "0.6", features = ["all"] }

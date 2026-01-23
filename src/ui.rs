@@ -297,6 +297,7 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
         .filter_map(|r| match r {
             RenderRow::Unified(r) => r.old_line,
             RenderRow::SideBySide(r) => r.old_line,
+            RenderRow::Decorated(r) => r.old_line_number,
             RenderRow::Section { .. } => None,
             RenderRow::FileHeader { .. } => None,
         })
@@ -308,6 +309,7 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
         .filter_map(|r| match r {
             RenderRow::Unified(r) => r.new_line,
             RenderRow::SideBySide(r) => r.new_line,
+            RenderRow::Decorated(r) => Some(r.line_number).filter(|&n| n > 0),
             RenderRow::Section { .. } => None,
             RenderRow::FileHeader { .. } => None,
         })
@@ -347,6 +349,21 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
                     r.old_line.map(|line| CommentLocator::Line {
                         side: crate::review::LineSide::Old,
                         line,
+                    })
+                } else {
+                    None
+                }
+            }
+            (RenderRow::Decorated(r), Some(_)) => {
+                if r.line_number > 0 {
+                    Some(CommentLocator::Line {
+                        side: crate::review::LineSide::New,
+                        line: r.line_number,
+                    })
+                } else if let Some(old_line) = r.old_line_number {
+                    Some(CommentLocator::Line {
+                        side: crate::review::LineSide::Old,
+                        line: old_line,
                     })
                 } else {
                     None
@@ -483,6 +500,42 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
                     new_w,
                     inner.width as usize,
                 ));
+            }
+            RenderRow::Decorated(r) => {
+                let (marker, marker_style) = match marker_state {
+                    Some(CommentState::HasUnresolved) => ("💬", Style::default().fg(Color::Yellow)),
+                    Some(CommentState::ResolvedOnly) => ("✓ ", Style::default().fg(Color::Green)),
+                    _ => ("  ", Style::default().fg(Color::Reset)),
+                };
+
+                // Git status marker and line number
+                let (git_marker, git_style) = match r.status {
+                    crate::diff::LineStatus::Unchanged => (" ", Style::default().fg(Color::Reset)),
+                    crate::diff::LineStatus::Added => ("+", Style::default().fg(Color::Green)),
+                    crate::diff::LineStatus::Removed => ("-", Style::default().fg(Color::Red)),
+                    crate::diff::LineStatus::Modified => ("~", Style::default().fg(Color::Yellow)),
+                };
+
+                let line_s = if r.line_number > 0 {
+                    format!("{:>new_w$}", r.line_number)
+                } else {
+                    " ".repeat(new_w)
+                };
+
+                let mut spans: Vec<Span<'static>> = Vec::with_capacity(5 + r.spans.len());
+                spans.push(Span::styled(marker.to_string(), marker_style));
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(line_s, Style::default().fg(Color::DarkGray)));
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(git_marker.to_string(), git_style));
+                spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
+                spans.extend(r.spans.iter().cloned());
+
+                let mut style = Style::default();
+                if abs_idx == s.diff_cursor {
+                    style = style.add_modifier(Modifier::REVERSED);
+                }
+                rendered.push(Line::from(spans).style(style));
             }
         }
     }
@@ -622,6 +675,7 @@ fn draw_footer(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
     let diff_mode = match s.diff_view_mode {
         DiffViewMode::Unified => "unified",
         DiffViewMode::SideBySide => "side-by-side",
+        DiffViewMode::Decorated => "decorated",
     };
 
     let mut left = match s.mode {

@@ -3374,7 +3374,6 @@ dependencies = [
  "gix",
  "gix-actor",
  "gix-date",
- "gix-diff",
  "gix-dir",
  "gix-hash",
  "gix-object",
@@ -3386,6 +3385,7 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+ "similar",
  "smallvec",
  "syntastica",
  "syntastica-parsers",
@@ -3683,6 +3683,16 @@ checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
 dependencies = [
  "errno",
  "libc",
+]
+
+[[package]]
+name = "similar"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
+dependencies = [
+ "bstr",
+ "unicode-segmentation",
 ]
 
 [[package]]
