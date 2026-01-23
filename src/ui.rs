@@ -118,9 +118,14 @@ pub struct DrawState<'a> {
     pub status: &'a str,
     pub show_help: bool,
     pub show_prompt: bool,
+    pub show_diff_popup: bool,
     pub comment_list: &'a [CommentListEntry],
     pub comment_list_selected: usize,
     pub comment_list_marked: &'a HashSet<usize>,
+
+    // Diff data for popup
+    pub current_diff_lines: &'a [crate::diff::Line],
+    pub diff_cursor_line: u32,  // Current line number in decorated view (for finding the hunk)
 }
 
 pub fn draw(f: &mut ratatui::Frame, s: DrawState<'_>) {
@@ -148,6 +153,9 @@ pub fn draw(f: &mut ratatui::Frame, s: DrawState<'_>) {
     }
     if s.mode == Mode::CommentList {
         draw_comment_list(f, outer, &s);
+    }
+    if s.show_diff_popup && s.mode == Mode::Browse {
+        draw_diff_popup(f, outer, &s);
     }
 }
 
@@ -663,6 +671,184 @@ fn render_side_by_side_line(
     Line::from(spans).style(style)
 }
 
+fn parse_hunk_header(header: &str) -> Option<(u32, u32, u32, u32)> {
+    // Parse hunk header like "@@ -3,4 +5,6 @@" to get (old_start, old_count, new_start, new_count)
+    let content = header.trim();
+    if !content.starts_with("@@") {
+        return None;
+    }
+
+    let parts: Vec<&str> = content.split_whitespace().collect();
+    if parts.len() < 3 {
+        return None;
+    }
+
+    // Parse "-3,4" -> old_start=3, old_count=4
+    let old_part = parts[1];
+    let new_part = parts[2];
+
+    let parse_range = |part: &str| -> Option<(u32, u32)> {
+        let part = part.trim_start_matches('-');
+        let nums: Vec<&str> = part.split(',').collect();
+        if nums.len() == 2 {
+            let start: u32 = nums[0].parse().ok()?;
+            let count: u32 = nums[1].parse().ok()?;
+            Some((start, count))
+        } else if nums.len() == 1 {
+            let start: u32 = nums[0].parse().ok()?;
+            Some((start, 1))
+        } else {
+            None
+        }
+    };
+
+    let (old_start, old_count) = parse_range(old_part)?;
+    let (new_start, new_count) = parse_range(new_part)?;
+
+    let old_end = old_start + old_count.saturating_sub(1);
+    let new_end = new_start + new_count.saturating_sub(1);
+
+    Some((old_start, old_end, new_start, new_end))
+}
+
+fn draw_diff_popup(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
+    // Calculate popup size (centered, about 80% of width and 60% of height)
+    let popup_width = (area.width * 4 / 5).min(120);
+    let popup_height = (area.height * 3 / 5).min(30);
+
+    let x = area.x + (area.width.saturating_sub(popup_width) / 2);
+    let y = area.y + (area.height.saturating_sub(popup_height) / 2);
+
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    // Clear the area first to make it opaque
+    f.render_widget(ratatui::widgets::Clear, popup_area);
+
+    // Create the popup
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Diff Hunk ")
+        .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .style(Style::default().bg(Color::Black));
+
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    // Find which hunk contains the current line
+    let current_line = s.diff_cursor_line;
+    let mut hunk_start = 0;
+    let mut hunk_end = s.current_diff_lines.len();
+
+    for (idx, diff_line) in s.current_diff_lines.iter().enumerate() {
+        if diff_line.kind == crate::diff::Kind::HunkHeader {
+            // Check if this hunk contains our line
+            if let Some((_old_start, _old_end, new_start, new_end)) = parse_hunk_header(&diff_line.text) {
+                if current_line >= new_start && current_line <= new_end {
+                    hunk_start = idx; // Include the hunk header
+                    // Find the end of this hunk (next hunk header or end of file)
+                    hunk_end = s.current_diff_lines[idx + 1..]
+                        .iter()
+                        .position(|l| l.kind == crate::diff::Kind::HunkHeader)
+                        .unwrap_or(s.current_diff_lines.len());
+                    break;
+                }
+            }
+        }
+    }
+
+    // Render only the current hunk using unified diff style
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // Calculate line number widths for this hunk
+    let old_max: u32 = s.current_diff_lines[hunk_start..hunk_end]
+        .iter()
+        .filter_map(|l| match l.kind {
+            crate::diff::Kind::Remove => l.old_line,
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    let new_max: u32 = s.current_diff_lines[hunk_start..hunk_end]
+        .iter()
+        .filter_map(|l| match l.kind {
+            crate::diff::Kind::Add | crate::diff::Kind::Context => l.new_line,
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    let old_w = old_max.to_string().len().max(4);
+    let new_w = new_max.to_string().len().max(4);
+
+    for diff_line in s.current_diff_lines[hunk_start..hunk_end].iter() {
+        match diff_line.kind {
+            crate::diff::Kind::FileHeader => {
+                let path = diff_line.text.strip_prefix("a/")
+                    .or(diff_line.text.strip_prefix("b/"))
+                    .unwrap_or(&diff_line.text);
+                lines.push(Line::from(vec![
+                    Span::styled(path.to_string(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                ]));
+            }
+            crate::diff::Kind::HunkHeader => {
+                lines.push(Line::from(vec![
+                    Span::styled(diff_line.text.clone(), Style::default().fg(Color::Yellow)),
+                ]));
+            }
+            crate::diff::Kind::Remove | crate::diff::Kind::Add | crate::diff::Kind::Context => {
+                let kind = diff_line.kind;
+
+                // Line number styling
+                let old_line_style = match kind {
+                    crate::diff::Kind::Remove => Style::default().fg(Color::Red),
+                    _ => Style::default().fg(Color::DarkGray),
+                };
+                let new_line_style = match kind {
+                    crate::diff::Kind::Add => Style::default().fg(Color::Green),
+                    _ => Style::default().fg(Color::DarkGray),
+                };
+
+                let old_s = diff_line
+                    .old_line
+                    .map(|n| format!("{:>old_w$}", n))
+                    .unwrap_or_else(|| " ".repeat(old_w));
+                let new_s = diff_line
+                    .new_line
+                    .map(|n| format!("{:>new_w$}", n))
+                    .unwrap_or_else(|| " ".repeat(new_w));
+
+                // Build content spans: use the text without prefix for gutter display
+                let content_text = diff_line.text.strip_prefix(|c| matches!(c, '+' | '-' | ' '))
+                    .unwrap_or(&diff_line.text);
+
+                // Color the content based on change type
+                let content_color = match kind {
+                    crate::diff::Kind::Add => Color::Green,
+                    crate::diff::Kind::Remove => Color::Red,
+                    crate::diff::Kind::Context => Color::Reset,
+                    _ => Color::Reset,
+                };
+
+                let mut spans: Vec<Span<'static>> = Vec::with_capacity(6);
+                spans.push(Span::raw("  ")); // No comment marker in popup
+                spans.push(Span::styled(old_s, old_line_style));
+                spans.push(Span::styled(" ", Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(new_s, new_line_style));
+                spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(content_text.to_string(), Style::default().fg(content_color)));
+
+                lines.push(Line::from(spans));
+            }
+        }
+    }
+
+    let paragraph = Paragraph::new(Text::from(lines))
+        .wrap(Wrap { trim: false })
+        .scroll((0, 0)); // Could add scrolling later
+
+    f.render_widget(paragraph, inner);
+}
+
 fn draw_footer(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
     let view_label = match (s.view, s.base_ref) {
         (ViewKind::All, _) => "all".to_string(),
@@ -753,7 +939,8 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect) {
         Line::from("  Ctrl+U / Ctrl+D   Page up / down"),
         Line::from("  Ctrl+N / Ctrl+P   Next/prev unreviewed file"),
         Line::from("  n                 Next hunk"),
-        Line::from("  i                 Toggle unified / side-by-side"),
+        Line::from("  i                 Cycle view mode (decorated/side-by-side/unified)"),
+        Line::from("  H                 Show/hide diff popup"),
         Line::from("  [ / ]             Less/more diff context"),
         Line::from("  R                 Reload file list"),
         Line::from("  c                 Add/edit comment (file or line)"),

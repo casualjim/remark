@@ -216,9 +216,16 @@ struct App {
     status: String,
     show_help: bool,
     show_prompt: bool,
+    show_diff_popup: bool,
     comment_list: Vec<CommentListEntry>,
     comment_list_selected: usize,
     comment_list_marked: HashSet<usize>,
+
+    // Store diff data for popup display
+    current_before: Option<String>,
+    current_after: Option<String>,
+    current_diff_lines: Vec<crate::diff::Line>,
+    current_file_path: Option<String>,
 
     highlighter: Highlighter,
 }
@@ -415,9 +422,14 @@ impl App {
             status: String::new(),
             show_help: false,
             show_prompt: false,
+            show_diff_popup: false,
             comment_list: Vec::new(),
             comment_list_selected: 0,
             comment_list_marked: HashSet::new(),
+            current_before: None,
+            current_after: None,
+            current_diff_lines: Vec::new(),
+            current_file_path: None,
             highlighter,
         };
         app.reload_view()?;
@@ -518,9 +530,12 @@ impl App {
                             status: &self.status,
                             show_help: self.show_help,
                             show_prompt: self.show_prompt,
+                            show_diff_popup: self.show_diff_popup,
                             comment_list: &self.comment_list,
                             comment_list_selected: self.comment_list_selected,
                             comment_list_marked: &self.comment_list_marked,
+                            current_diff_lines: &self.current_diff_lines,
+                            diff_cursor_line: self.get_current_line_number(),
                         },
                     )
                 })
@@ -602,6 +617,11 @@ impl App {
         }
 
         if key.code == KeyCode::Esc {
+            if self.show_diff_popup {
+                self.show_diff_popup = false;
+                self.status.clear();
+                return Ok(false);
+            }
             return Ok(true);
         }
 
@@ -694,10 +714,31 @@ impl App {
             }
             KeyCode::Char('c') if key.modifiers.is_empty() => self.begin_comment()?,
             KeyCode::Char('d') if key.modifiers.is_empty() => self.delete_comment()?,
+            KeyCode::Char('H') => self.toggle_diff_popup()?,
+            KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::SHIFT) => self.toggle_diff_popup()?,
             KeyCode::Char('r') if key.modifiers.is_empty() => self.toggle_resolved()?,
             KeyCode::Char('[') if key.modifiers.is_empty() => self.adjust_diff_context(-1)?,
             KeyCode::Char(']') if key.modifiers.is_empty() => self.adjust_diff_context(1)?,
             _ => {}
+        }
+        Ok(())
+    }
+
+    fn get_current_line_number(&self) -> u32 {
+        self.diff_rows.get(self.diff_cursor)
+            .and_then(|r| match r {
+                RenderRow::Decorated(dr) => Some(dr.line_number),
+                _ => None,
+            })
+            .unwrap_or(0)
+    }
+
+    fn toggle_diff_popup(&mut self) -> Result<()> {
+        self.show_diff_popup = !self.show_diff_popup;
+        if self.show_diff_popup {
+            self.status = format!("Diff popup open ({} lines), press ESC or 'H' to close", self.current_diff_lines.len());
+        } else {
+            self.status.clear();
         }
         Ok(())
     }
@@ -1511,7 +1552,8 @@ impl App {
             self.diff_context,
         )?;
         let diff_lines: Vec<crate::diff::Line> = diff_lines_all
-            .into_iter()
+            .iter()
+            .cloned()
             .filter(|l| l.kind != crate::diff::Kind::FileHeader)
             .collect();
 
@@ -1558,6 +1600,11 @@ impl App {
         rows.insert(0, RenderRow::FileHeader { path: path.clone() });
 
         self.diff_rows = rows;
+        // Store diff data for popup display
+        self.current_before = before;
+        self.current_after = after;
+        self.current_diff_lines = diff_lines_all; // Store full diff including headers
+        self.current_file_path = Some(path.clone());
         self.diff_cursor = self
             .diff_rows
             .iter()
@@ -2825,9 +2872,14 @@ mod tests {
             status: String::new(),
             show_help: false,
             show_prompt: false,
+            show_diff_popup: false,
             comment_list: Vec::new(),
             comment_list_selected: 0,
             comment_list_marked: HashSet::new(),
+            current_before: None,
+            current_after: None,
+            current_diff_lines: Vec::new(),
+            current_file_path: None,
             highlighter: Highlighter::new().expect("highlighter"),
         }
     }

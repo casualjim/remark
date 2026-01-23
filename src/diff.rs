@@ -12,6 +12,7 @@ pub enum Kind {
 
 /// Line status for the decorated view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]  // Modified variant reserved for future use
 pub enum LineStatus {
     Unchanged,
     Added,
@@ -22,7 +23,6 @@ pub enum LineStatus {
 #[derive(Debug, Clone)]
 pub struct InlineSpan {
     pub text: String,
-    pub emphasized: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -111,12 +111,11 @@ pub fn unified_file_diff(
                     ),
                 };
 
-                // Build inline spans with emphasis
+                // Build inline spans
                 let inline_spans: Vec<InlineSpan> = change
                     .iter_strings_lossy()
-                    .map(|(emphasized, text)| InlineSpan {
+                    .map(|(_emphasized, text)| InlineSpan {
                         text: text.into_owned(),
-                        emphasized,
                     })
                     .collect();
 
@@ -391,47 +390,6 @@ mod tests {
             .map(|l| l.text.as_str())
             .unwrap();
         assert!(header.contains("one") || header.contains("two"), "{header}");
-    }
-
-    #[test]
-    fn inline_highlights_changed_words() {
-        let before = "fn foo() -> u32 { 1 }";
-        let after = "fn foo() -> u32 { 42 }";
-
-        let lines = unified_file_diff("a.rs", "b.rs", Some(before), Some(after), 3).unwrap();
-
-        // Find the Add line
-        let add_line = lines.iter().find(|l| l.kind == Kind::Add).unwrap();
-        assert!(add_line.inline_spans.is_some());
-
-        let spans = add_line.inline_spans.as_ref().unwrap();
-        // "42" should be emphasized
-        assert!(
-            spans.iter().any(|s| s.emphasized && s.text.contains("42")),
-            "expected emphasized '42' in spans: {spans:?}"
-        );
-        // "{", "}" should NOT be emphasized
-        assert!(
-            !spans.iter().any(|s| s.emphasized && (s.text == "{" || s.text == "}")),
-            "did not expect emphasized braces in spans: {spans:?}"
-        );
-    }
-
-    #[test]
-    fn inline_handles_unicode_words() {
-        let before = "let x = 1;";
-        let after = "let value = 1;";
-
-        let lines = unified_file_diff("a.rs", "b.rs", Some(before), Some(after), 3).unwrap();
-
-        let add_line = lines.iter().find(|l| l.kind == Kind::Add).unwrap();
-        let spans = add_line.inline_spans.as_ref().unwrap();
-
-        // "value" should be emphasized as a whole word (unicode tokenization)
-        assert!(
-            spans.iter().any(|s| s.emphasized && s.text == "value"),
-            "expected emphasized 'value' in spans: {spans:?}"
-        );
     }
 
     #[test]
