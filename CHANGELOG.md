@@ -1,8 +1,16 @@
+## [0.4.0] - 2026-01-23
+
+### 🚀 Features
+
+- Add decorated view mode with git decorations
+- Add diff popup with unified hunk display
 ## [0.3.3] - 2026-01-15
 
 ### ⚙️ Miscellaneous Tasks
 
 - Update release bump flow and docs
+- Update changelog for v0.3.3 [ci skip]
+- Release remark version 0.3.3
 ## [0.3.2] - 2026-01-15
 
 ### ⚙️ Miscellaneous Tasks
