@@ -55,32 +55,58 @@ impl FileTreeView {
   pub(crate) fn file_at_row(&self, row: usize) -> Option<usize> {
     self.rows.get(row)?.file_index
   }
+
+  pub(crate) fn next_file_row(&self, current_row: usize) -> Option<usize> {
+    (current_row + 1..self.rows.len())
+      .find(|&row| self.rows[row].file_index.is_some())
+  }
+
+  pub(crate) fn prev_file_row(&self, current_row: usize) -> Option<usize> {
+    (0..current_row)
+      .rev()
+      .find(|&row| self.rows[row].file_index.is_some())
+  }
 }
 
 fn walk_node(node: &Node, prefix_stack: &mut Vec<bool>, is_root: bool, out: &mut FileTreeView) {
-  let mut entries: Vec<(String, EntryRef<'_>)> = Vec::new();
-  entries.extend(node.files.iter().map(|(name, idx)| {
-    (
-      name.clone(),
-      EntryRef::File {
-        name: name.as_str(),
-        file_index: *idx,
-      },
-    )
-  }));
-  entries.extend(node.dirs.iter().map(|(name, child)| {
-    (
-      format!("{name}/"),
-      EntryRef::Dir {
-        name: name.as_str(),
-        child,
-      },
-    )
-  }));
-  entries.sort_by(|a, b| a.0.cmp(&b.0));
+  // Collect directories separately from files so we can sort them independently
+  let mut dirs: Vec<(String, EntryRef<'_>)> = node
+    .dirs
+    .iter()
+    .map(|(name, child)| {
+      (
+        name.clone(),
+        EntryRef::Dir {
+          name: name.as_str(),
+          child,
+        },
+      )
+    })
+    .collect();
 
-  let total = entries.len();
-  for (i, (_sort_key, entry)) in entries.into_iter().enumerate() {
+  let mut files: Vec<(String, EntryRef<'_>)> = node
+    .files
+    .iter()
+    .map(|(name, idx)| {
+      (
+        name.clone(),
+        EntryRef::File {
+          name: name.as_str(),
+          file_index: *idx,
+        },
+      )
+    })
+    .collect();
+
+  // Sort directories and files independently
+  dirs.sort_by(|a, b| a.0.cmp(&b.0));
+  files.sort_by(|a, b| a.0.cmp(&b.0));
+
+  // Chain directories first, then files
+  let entries = dirs.into_iter().chain(files);
+  let total = node.dirs.len() + node.files.len();
+
+  for (i, (_sort_key, entry)) in entries.enumerate() {
     let is_last = i + 1 == total;
     match entry {
       EntryRef::File { name, file_index } => {
@@ -178,10 +204,13 @@ mod tests {
     let view = FileTreeView::build(&files);
 
     let labels: Vec<&str> = view.rows.iter().map(|r| r.label.as_str()).collect();
-    assert_eq!(labels, vec!["README.md", "src/", "├─ app.rs", "└─ ui.rs"]);
-    assert_eq!(view.file_to_row, vec![0, 2, 3]);
-    assert_eq!(view.file_at_row(1), None);
-    assert_eq!(view.file_at_row(2), Some(1));
-    assert_eq!(view.file_at_row(3), Some(2));
+    // Directories now come before files: src/ comes before README.md
+    assert_eq!(labels, vec!["src/", "├─ app.rs", "└─ ui.rs", "README.md"]);
+    // file_to_row maps: files[0]=README.md->row3, files[1]=app.rs->row1, files[2]=ui.rs->row2
+    assert_eq!(view.file_to_row, vec![3, 1, 2]);
+    assert_eq!(view.file_at_row(0), None);  // src/ is a dir
+    assert_eq!(view.file_at_row(1), Some(1));  // app.rs
+    assert_eq!(view.file_at_row(2), Some(2));  // ui.rs
+    assert_eq!(view.file_at_row(3), Some(0));  // README.md
   }
 }

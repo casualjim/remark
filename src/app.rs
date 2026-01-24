@@ -120,15 +120,17 @@ enum KeepLine {
 pub fn run(repo: gix::Repository, options: UiOptions) -> Result<()> {
   let mut ui = crate::ui::Ui::new()?;
 
-  let mut app = App::new(
-    repo,
-    options.notes_ref,
-    options.base_ref,
-    options.show_ignored,
-    options.view,
-    options.jump_target,
-  )?;
-  let res = app.run_loop(&mut ui);
+  let res = (|| {
+    let mut app = App::new(
+      repo,
+      options.notes_ref,
+      options.base_ref,
+      options.show_ignored,
+      options.view,
+      options.jump_target,
+    )?;
+    app.run_loop(&mut ui)
+  })();
 
   ui.restore().ok();
   res
@@ -1625,10 +1627,27 @@ impl App {
       self.file_selected = 0;
       return Ok(());
     }
-    let cur = self.file_selected as i32;
-    let max = (self.files.len() - 1) as i32;
-    self.file_selected = (cur + delta).clamp(0, max) as usize;
-    self.reload_diff_for_selected()?;
+
+    // Get current row from file index
+    let current_row = self.file_tree.selected_row(self.file_selected).unwrap_or(0);
+
+    // Find next/previous file row
+    let new_row = if delta > 0 {
+      // Navigate forward - use saturating to stay at last file if we go past it
+      (0..delta)
+        .fold(current_row, |row, _| self.file_tree.next_file_row(row).unwrap_or(row))
+    } else {
+      // Navigate backward - use saturating to stay at first file if we go before it
+      (0..delta.abs())
+        .fold(current_row, |row, _| self.file_tree.prev_file_row(row).unwrap_or(row))
+    };
+
+    // Update file_selected from the new row
+    if let Some(file_idx) = self.file_tree.file_at_row(new_row) {
+      self.file_selected = file_idx;
+      self.reload_diff_for_selected()?;
+    }
+
     Ok(())
   }
 
@@ -2487,19 +2506,21 @@ impl App {
   ) -> Vec<ratatui::text::Span<'static>> {
     use ratatui::style::Color;
 
-    // Base style based on diff kind (no emphasis, just color)
-    let base_color = match kind {
-      crate::diff::Kind::Remove => Color::Red,
-      crate::diff::Kind::Add => Color::Green,
-      _ => return vec![ratatui::text::Span::raw("")],
-    };
-
-    // If we have syntax highlighting, use it as-is
+    // If we have syntax highlighting, use it as-is (for Context, Add, and Remove lines)
     if let Some(syntax) = syntax_spans {
+      // For Context lines, use syntax highlighting as-is
+      // For Add/Remove lines, we could optionally add color, but syntax highlighting is enough
       return syntax.to_vec();
     }
 
     // No syntax highlighting, just return spans with base color
+    let base_color = match kind {
+      crate::diff::Kind::Remove => Color::Red,
+      crate::diff::Kind::Add => Color::Green,
+      crate::diff::Kind::Context => Color::Reset,  // Context lines get default color
+      _ => Color::Reset,
+    };
+
     // Reconstruct text from inline spans without emphasis
     let text = _inline_spans
       .iter()

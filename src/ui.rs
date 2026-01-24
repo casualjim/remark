@@ -71,6 +71,13 @@ impl Ui {
   }
 }
 
+impl Drop for Ui {
+  fn drop(&mut self) {
+    // Restore terminal state in case of panic
+    self.restore().ok();
+  }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct LayoutRects {
   pub files: Rect,
