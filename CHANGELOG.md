@@ -1,9 +1,24 @@
+## [0.4.1] - 2026-01-24
+
+### 🐛 Bug Fixes
+
+- Handle empty repos and improve file tree navigation
+- Improve diff rendering with syntax highlighting and inline emphasis
+
+### 🎨 Styling
+
+- Apply formatting fixes
 ## [0.4.0] - 2026-01-23
 
 ### 🚀 Features
 
 - Add decorated view mode with git decorations
 - Add diff popup with unified hunk display
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.4.0 [ci skip]
+- Release remark version 0.4.0
 ## [0.3.3] - 2026-01-15
 
 ### ⚙️ Miscellaneous Tasks
