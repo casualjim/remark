@@ -29,6 +29,11 @@ impl Highlighter {
     for line in themed {
       let mut spans = Vec::with_capacity(line.len());
       for (chunk, style) in line {
+        // Strip trailing newlines/carriage returns from chunks to avoid extra blank lines
+        let chunk = chunk.trim_end_matches(|c| c == '\n' || c == '\r');
+        if chunk.is_empty() {
+          continue;
+        }
         let span = match style {
           Some(s) => Span::styled(chunk.to_string(), syn_style_to_tui(&s)),
           None => Span::raw(chunk.to_string()),

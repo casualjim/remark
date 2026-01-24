@@ -23,6 +23,7 @@ pub enum LineStatus {
 #[derive(Debug, Clone)]
 pub struct InlineSpan {
   pub text: String,
+  pub emphasized: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -105,8 +106,9 @@ pub fn unified_file_diff(
         // Build inline spans
         let inline_spans: Vec<InlineSpan> = change
           .iter_strings_lossy()
-          .map(|(_emphasized, text)| InlineSpan {
+          .map(|(emphasized, text)| InlineSpan {
             text: text.into_owned(),
+            emphasized,
           })
           .collect();
 
