@@ -47,7 +47,9 @@ local project_steps = new Mapping<String, Step> {
 
   ["hadolint"] = Builtins.hadolint
 
-  ["trailing-whitespace"] = Builtins.trailing_whitespace
+  ["trailing-whitespace"] = (Builtins.trailing_whitespace) {
+    exclude = List("wix/**")
+  }
 
   ["check-toml"] = (Builtins.taplo) {
     glob = List("**/*.toml")

@@ -1634,12 +1634,14 @@ impl App {
     // Find next/previous file row
     let new_row = if delta > 0 {
       // Navigate forward - use saturating to stay at last file if we go past it
-      (0..delta)
-        .fold(current_row, |row, _| self.file_tree.next_file_row(row).unwrap_or(row))
+      (0..delta).fold(current_row, |row, _| {
+        self.file_tree.next_file_row(row).unwrap_or(row)
+      })
     } else {
       // Navigate backward - use saturating to stay at first file if we go before it
-      (0..delta.abs())
-        .fold(current_row, |row, _| self.file_tree.prev_file_row(row).unwrap_or(row))
+      (0..delta.abs()).fold(current_row, |row, _| {
+        self.file_tree.prev_file_row(row).unwrap_or(row)
+      })
     };
 
     // Update file_selected from the new row
@@ -2610,8 +2612,20 @@ impl App {
             let left = removes.get(j);
             let right = adds.get(j);
             // Strip trailing newlines from diff lines
-            let left_code = left.map(|l| l.text.get(1..).unwrap_or("").trim_end_matches('\n').to_string());
-            let right_code = right.map(|l| l.text.get(1..).unwrap_or("").trim_end_matches('\n').to_string());
+            let left_code = left.map(|l| {
+              l.text
+                .get(1..)
+                .unwrap_or("")
+                .trim_end_matches('\n')
+                .to_string()
+            });
+            let right_code = right.map(|l| {
+              l.text
+                .get(1..)
+                .unwrap_or("")
+                .trim_end_matches('\n')
+                .to_string()
+            });
             rows.push(RenderRow::SideBySide(SideBySideRow {
               left_kind: left.map(|_| crate::diff::Kind::Remove),
               right_kind: right.map(|_| crate::diff::Kind::Add),

@@ -57,8 +57,7 @@ impl FileTreeView {
   }
 
   pub(crate) fn next_file_row(&self, current_row: usize) -> Option<usize> {
-    (current_row + 1..self.rows.len())
-      .find(|&row| self.rows[row].file_index.is_some())
+    (current_row + 1..self.rows.len()).find(|&row| self.rows[row].file_index.is_some())
   }
 
   pub(crate) fn prev_file_row(&self, current_row: usize) -> Option<usize> {
@@ -208,9 +207,9 @@ mod tests {
     assert_eq!(labels, vec!["src/", "├─ app.rs", "└─ ui.rs", "README.md"]);
     // file_to_row maps: files[0]=README.md->row3, files[1]=app.rs->row1, files[2]=ui.rs->row2
     assert_eq!(view.file_to_row, vec![3, 1, 2]);
-    assert_eq!(view.file_at_row(0), None);  // src/ is a dir
-    assert_eq!(view.file_at_row(1), Some(1));  // app.rs
-    assert_eq!(view.file_at_row(2), Some(2));  // ui.rs
-    assert_eq!(view.file_at_row(3), Some(0));  // README.md
+    assert_eq!(view.file_at_row(0), None); // src/ is a dir
+    assert_eq!(view.file_at_row(1), Some(1)); // app.rs
+    assert_eq!(view.file_at_row(2), Some(2)); // ui.rs
+    assert_eq!(view.file_at_row(3), Some(0)); // README.md
   }
 }

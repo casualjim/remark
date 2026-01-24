@@ -30,7 +30,7 @@ impl Highlighter {
       let mut spans = Vec::with_capacity(line.len());
       for (chunk, style) in line {
         // Strip trailing newlines/carriage returns from chunks to avoid extra blank lines
-        let chunk = chunk.trim_end_matches(|c| c == '\n' || c == '\r');
+        let chunk = chunk.trim_end_matches(['\n', '\r']);
         if chunk.is_empty() {
           continue;
         }
