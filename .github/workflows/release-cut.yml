@@ -33,10 +33,10 @@ jobs:
           git config user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-      - name: Install cargo-binstall
-        uses: cargo-bins/cargo-binstall@main
       - name: Install cargo-release and git-cliff
-        run: cargo binstall -y cargo-release git-cliff
+        run: |-
+          cargo install cargo-binstall
+          cargo binstall -y cargo-release git-cliff
       - name: Determine version bump
         id: bump
         uses: actions/github-script@v7
