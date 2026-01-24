@@ -361,7 +361,14 @@ pub fn list_unstaged_paths(repo: &Repository, include_ignored: bool) -> Result<V
 }
 
 pub fn list_staged_status(repo: &Repository) -> Result<BTreeMap<String, char>> {
-  let head_tree_id = repo.head_tree_id().context("get HEAD tree id")?;
+  let head_tree_id = match repo.head_tree_id() {
+    Ok(id) => id,
+    Err(e) if is_empty_repo_error(&e) => {
+      // Empty repo - use status platform to get staged files
+      return list_staged_status_empty_repo(repo);
+    }
+    Err(e) => return Err(e).context("get HEAD tree id"),
+  };
   let index = repo
     .index_or_load_from_head_or_empty()
     .context("open worktree index")?;
@@ -393,6 +400,68 @@ pub fn list_staged_status(repo: &Repository) -> Result<BTreeMap<String, char>> {
   Ok(out)
 }
 
+fn list_staged_status_empty_repo(repo: &Repository) -> Result<BTreeMap<String, char>> {
+  let mut out = BTreeMap::<String, char>::new();
+
+  // In an empty repo, the status API doesn't work as expected.
+  // Use dirwalk to find all tracked (staged) files.
+  let index = repo.index_or_empty().context("open index")?;
+  let mut options = repo.dirwalk_options().context("init dirwalk options")?;
+  options.set_emit_tracked(true);
+  // Don't emit untracked files - only staged files
+  options.set_emit_untracked(gix_dir::walk::EmissionMode::Matching);
+  options.set_emit_ignored(None);
+
+  let mut delegate = gix_dir::walk::delegate::Collect::default();
+  let should_interrupt = std::sync::atomic::AtomicBool::new(false);
+  repo
+    .dirwalk(
+      &index,
+      std::iter::empty::<&gix::bstr::BStr>(),
+      &should_interrupt,
+      options,
+      &mut delegate,
+    )
+    .context("dirwalk worktree")?;
+
+  // All tracked files in an empty repo are staged additions
+  for (entry, _) in delegate.into_entries_by_path() {
+    let path = entry.rela_path.to_str_lossy().into_owned();
+
+    // Check if it's a file (not a directory)
+    let kind = entry.disk_kind.or(entry.index_kind);
+    if matches!(
+      kind,
+      Some(gix_dir::entry::Kind::File | gix_dir::entry::Kind::Symlink)
+    ) {
+      out.insert(path, 'A');
+    }
+  }
+
+  Ok(out)
+}
+
+fn is_empty_repo_error<E: std::error::Error + ?Sized>(e: &E) -> bool {
+  // Check the error message itself
+  let msg = e.to_string();
+  if msg.contains("does not have any commits")
+    || msg.contains("does not exist")
+    || msg.contains("not found")
+    || msg.contains("ambiguous name")
+  {
+    return true;
+  }
+  // Check the source error
+  let Some(source) = e.source() else {
+    return false;
+  };
+  let msg = source.to_string();
+  msg.contains("does not have any commits")
+    || msg.contains("does not exist")
+    || msg.contains("not found")
+    || msg.contains("ambiguous name")
+}
+
 pub fn list_staged_paths(repo: &Repository) -> Result<Vec<String>> {
   let mut out: Vec<String> = list_staged_status(repo)?.into_keys().collect();
   out.sort();
@@ -400,8 +469,13 @@ pub fn list_staged_paths(repo: &Repository) -> Result<Vec<String>> {
 }
 
 pub fn list_base_paths(repo: &Repository, base_ref: &str) -> Result<Vec<String>> {
+  let head_tree = match repo.head_tree() {
+    Ok(t) => t,
+    Err(e) if is_empty_repo_error(&e) => return Ok(Vec::new()),
+    Err(e) => return Err(e).context("head tree"),
+  };
+
   let base_tree = merge_base_tree(repo, base_ref)?;
-  let head_tree = repo.head_tree().context("head tree")?;
 
   let changes = repo
     .diff_tree_to_tree(Some(&base_tree), Some(&head_tree), None)
@@ -476,7 +550,11 @@ pub fn try_read_index(repo: &Repository, path: &str) -> Result<Option<String>> {
 }
 
 pub fn try_read_head(repo: &Repository, path: &str) -> Result<Option<String>> {
-  let tree = repo.head_tree().context("read HEAD tree")?;
+  let tree = match repo.head_tree() {
+    Ok(t) => t,
+    Err(e) if is_empty_repo_error(&e) => return Ok(None),
+    Err(e) => return Err(e).context("read HEAD tree"),
+  };
   let Some(entry) = tree
     .lookup_entry_by_path(path)
     .with_context(|| format!("lookup '{path}' in HEAD tree"))?
@@ -546,5 +624,61 @@ mod tests {
 
     let paths_shown = list_unstaged_paths(&repo, true).expect("list paths");
     assert!(paths_shown.contains(&"ignored.txt".to_string()));
+  }
+
+  #[test]
+  fn list_staged_status_handles_empty_repo() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let repo = gix::init(td.path()).expect("init repo");
+
+    // Empty repo with no commits should return empty status
+    let status = list_staged_status(&repo).expect("list staged status");
+    assert!(status.is_empty());
+
+    let paths = list_staged_paths(&repo).expect("list staged paths");
+    assert!(paths.is_empty());
+  }
+
+  #[test]
+  fn list_staged_status_handles_staged_files_in_empty_repo() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let repo = gix::init(td.path()).expect("init repo");
+
+    // Add and stage a file in an empty repo
+    std::fs::write(td.path().join("newfile.txt"), "hello world").expect("write file");
+
+    // Stage the file using git add via Command
+    let status = std::process::Command::new("git")
+      .arg("add")
+      .arg("newfile.txt")
+      .current_dir(td.path())
+      .status()
+      .expect("git add");
+
+    assert!(status.success(), "git add should succeed");
+
+    // Staged files should be shown as additions even without commits
+    let staged_status = list_staged_status(&repo).expect("list staged status");
+    assert_eq!(staged_status.get("newfile.txt"), Some(&'A'));
+  }
+
+  #[test]
+  fn try_read_head_handles_empty_repo() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let repo = gix::init(td.path()).expect("init repo");
+
+    // Reading from HEAD in empty repo should return None
+    let result = try_read_head(&repo, "some.txt").expect("try read head");
+    assert!(result.is_none());
+  }
+
+  #[test]
+  fn list_base_paths_handles_empty_repo() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let repo = gix::init(td.path()).expect("init repo");
+
+    // Empty repo should return empty list for base paths
+    let paths = list_base_paths(&repo, "main").expect("list base paths");
+    assert!(paths.is_empty());
   }
 }

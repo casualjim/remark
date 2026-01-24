@@ -120,15 +120,17 @@ enum KeepLine {
 pub fn run(repo: gix::Repository, options: UiOptions) -> Result<()> {
   let mut ui = crate::ui::Ui::new()?;
 
-  let mut app = App::new(
-    repo,
-    options.notes_ref,
-    options.base_ref,
-    options.show_ignored,
-    options.view,
-    options.jump_target,
-  )?;
-  let res = app.run_loop(&mut ui);
+  let res = (|| {
+    let mut app = App::new(
+      repo,
+      options.notes_ref,
+      options.base_ref,
+      options.show_ignored,
+      options.view,
+      options.jump_target,
+    )?;
+    app.run_loop(&mut ui)
+  })();
 
   ui.restore().ok();
   res
@@ -1625,10 +1627,29 @@ impl App {
       self.file_selected = 0;
       return Ok(());
     }
-    let cur = self.file_selected as i32;
-    let max = (self.files.len() - 1) as i32;
-    self.file_selected = (cur + delta).clamp(0, max) as usize;
-    self.reload_diff_for_selected()?;
+
+    // Get current row from file index
+    let current_row = self.file_tree.selected_row(self.file_selected).unwrap_or(0);
+
+    // Find next/previous file row
+    let new_row = if delta > 0 {
+      // Navigate forward - use saturating to stay at last file if we go past it
+      (0..delta).fold(current_row, |row, _| {
+        self.file_tree.next_file_row(row).unwrap_or(row)
+      })
+    } else {
+      // Navigate backward - use saturating to stay at first file if we go before it
+      (0..delta.abs()).fold(current_row, |row, _| {
+        self.file_tree.prev_file_row(row).unwrap_or(row)
+      })
+    };
+
+    // Update file_selected from the new row
+    if let Some(file_idx) = self.file_tree.file_at_row(new_row) {
+      self.file_selected = file_idx;
+      self.reload_diff_for_selected()?;
+    }
+
     Ok(())
   }
 
@@ -2409,22 +2430,34 @@ impl App {
     &self,
     path: &str,
     diff_lines: &[crate::diff::Line],
-    _raw: &str,
+    raw: &str,
   ) -> Result<Vec<RenderRow>> {
+    let mut diff_hl = self.highlighter.highlight_diff(raw)?;
+    if diff_hl.len() > diff_lines.len() {
+      diff_hl.truncate(diff_lines.len());
+    }
+
     let lang = self.highlighter.detect_file_lang(&self.repo, path);
     let mut code_block = String::new();
-    let mut code_map: Vec<(usize, usize)> = Vec::new(); // (diff_idx, code_idx)
+    let mut code_map: Vec<(usize, usize)> = Vec::new();
+
     for (idx, dl) in diff_lines.iter().enumerate() {
       match dl.kind {
         crate::diff::Kind::Context | crate::diff::Kind::Add | crate::diff::Kind::Remove => {
-          let code = dl.text.get(1..).unwrap_or("").to_string();
+          // Strip the diff prefix and any trailing newline (the change text already has \n)
+          let code = dl.text.get(1..).unwrap_or("").trim_end_matches('\n');
           let code_idx = code_map.len();
           code_map.push((idx, code_idx));
-          code_block.push_str(&code);
+          code_block.push_str(code);
           code_block.push('\n');
         }
         _ => {}
       }
+    }
+
+    // Remove trailing newline to avoid off-by-one issues with the highlighter
+    if code_block.ends_with('\n') {
+      code_block.pop();
     }
 
     let code_hl: Vec<Vec<ratatui::text::Span<'static>>> = match lang {
@@ -2435,8 +2468,8 @@ impl App {
     let mut code_by_diff: Vec<Option<Vec<ratatui::text::Span<'static>>>> =
       vec![None; diff_lines.len()];
     for (diff_idx, code_idx) in code_map {
-      if let Some(line) = code_hl.get(code_idx).cloned() {
-        code_by_diff[diff_idx] = Some(line);
+      if let Some(line) = code_hl.get(code_idx) {
+        code_by_diff[diff_idx] = Some(line.clone());
       }
     }
 
@@ -2449,24 +2482,16 @@ impl App {
         continue;
       }
 
-      let spans = match dl.kind {
-        crate::diff::Kind::Context | crate::diff::Kind::Add | crate::diff::Kind::Remove => {
-          // Merge inline emphasis with syntax highlighting
-          if let Some(inline_spans) = &dl.inline_spans {
-            let syntax_spans = code_by_diff[idx].as_deref();
-            Self::merge_inline_with_syntax(inline_spans, syntax_spans, dl.kind)
-          } else {
-            code_by_diff[idx].clone().unwrap_or_else(|| {
-              vec![ratatui::text::Span::raw(
-                dl.text.get(1..).unwrap_or("").to_string(),
-              )]
-            })
-          }
+      let spans = if let Some(hl) = code_by_diff.get(idx).and_then(|o| o.as_ref()) {
+        // Merge inline spans with syntax highlighting if available
+        if let Some(inline_spans) = &dl.inline_spans {
+          Self::merge_inline_with_syntax(inline_spans, hl)
+        } else {
+          hl.clone()
         }
-        _ => {
-          // File headers
-          vec![ratatui::text::Span::raw(dl.text.clone())]
-        }
+      } else {
+        let text = dl.text.get(1..).unwrap_or("").to_string();
+        vec![ratatui::text::Span::raw(text)]
       };
       rows.push(RenderRow::Unified(DiffRow {
         kind: dl.kind,
@@ -2479,36 +2504,46 @@ impl App {
     Ok(rows)
   }
 
-  // Merge inline emphasis with syntax highlighting
+  /// Merge inline emphasis (from similar crate) with syntax highlighting.
+  /// If any part is emphasized, adds underline to all syntax spans.
   fn merge_inline_with_syntax(
-    _inline_spans: &[crate::diff::InlineSpan],
-    syntax_spans: Option<&[ratatui::text::Span<'static>]>,
-    kind: crate::diff::Kind,
+    inline_spans: &[crate::diff::InlineSpan],
+    syntax_spans: &[ratatui::text::Span<'static>],
   ) -> Vec<ratatui::text::Span<'static>> {
-    use ratatui::style::Color;
+    use ratatui::style::Modifier;
 
-    // Base style based on diff kind (no emphasis, just color)
-    let base_color = match kind {
-      crate::diff::Kind::Remove => Color::Red,
-      crate::diff::Kind::Add => Color::Green,
-      _ => return vec![ratatui::text::Span::raw("")],
-    };
+    // Check if any inline span is emphasized
+    let has_emphasis = inline_spans.iter().any(|s| s.emphasized);
 
-    // If we have syntax highlighting, use it as-is
-    if let Some(syntax) = syntax_spans {
-      return syntax.to_vec();
+    // If no syntax highlighting, create raw spans with underline for emphasized parts
+    if syntax_spans.is_empty() {
+      return inline_spans
+        .iter()
+        .map(|s| {
+          let mut style = ratatui::style::Style::default();
+          if s.emphasized {
+            style = style
+              .add_modifier(Modifier::BOLD)
+              .add_modifier(Modifier::UNDERLINED);
+          }
+          ratatui::text::Span::styled(s.text.clone(), style)
+        })
+        .collect();
     }
 
-    // No syntax highlighting, just return spans with base color
-    // Reconstruct text from inline spans without emphasis
-    let text = _inline_spans
+    // Apply syntax highlighting with underline added if any part is emphasized
+    syntax_spans
       .iter()
-      .map(|s| s.text.as_str())
-      .collect::<String>();
-    vec![ratatui::text::Span::styled(
-      text,
-      ratatui::style::Style::default().fg(base_color),
-    )]
+      .map(|span| {
+        let mut style = span.style;
+        if has_emphasis {
+          style = style
+            .add_modifier(Modifier::BOLD)
+            .add_modifier(Modifier::UNDERLINED);
+        }
+        ratatui::text::Span::styled(span.content.clone(), style)
+      })
+      .collect()
   }
 
   fn build_side_by_side_rows(
@@ -2538,20 +2573,21 @@ impl App {
           i += 1;
         }
         crate::diff::Kind::Context => {
-          let code = dl.text.get(1..).unwrap_or("").to_string();
+          // Strip the diff prefix and any trailing newline
+          let code = dl.text.get(1..).unwrap_or("").trim_end_matches('\n');
           rows.push(RenderRow::SideBySide(SideBySideRow {
             left_kind: Some(crate::diff::Kind::Context),
             right_kind: Some(crate::diff::Kind::Context),
             old_line: dl.old_line,
             new_line: dl.new_line,
-            left_spans: vec![ratatui::text::Span::raw(code.clone())],
-            right_spans: vec![ratatui::text::Span::raw(code.clone())],
+            left_spans: vec![ratatui::text::Span::raw(code.to_string())],
+            right_spans: vec![ratatui::text::Span::raw(code.to_string())],
           }));
           temps.push(Some(Temp {
-            left_code: Some(code.clone()),
-            right_code: Some(code),
-            left_inline: None,
-            right_inline: None,
+            left_code: Some(code.to_string()),
+            right_code: Some(code.to_string()),
+            left_inline: dl.inline_spans.clone(),
+            right_inline: dl.inline_spans.clone(),
           }));
           i += 1;
         }
@@ -2575,8 +2611,21 @@ impl App {
           for j in 0..max {
             let left = removes.get(j);
             let right = adds.get(j);
-            let left_code = left.map(|l| l.text.get(1..).unwrap_or("").to_string());
-            let right_code = right.map(|l| l.text.get(1..).unwrap_or("").to_string());
+            // Strip trailing newlines from diff lines
+            let left_code = left.map(|l| {
+              l.text
+                .get(1..)
+                .unwrap_or("")
+                .trim_end_matches('\n')
+                .to_string()
+            });
+            let right_code = right.map(|l| {
+              l.text
+                .get(1..)
+                .unwrap_or("")
+                .trim_end_matches('\n')
+                .to_string()
+            });
             rows.push(RenderRow::SideBySide(SideBySideRow {
               left_kind: left.map(|_| crate::diff::Kind::Remove),
               right_kind: right.map(|_| crate::diff::Kind::Add),
@@ -2630,32 +2679,38 @@ impl App {
       }
     }
 
+    // Remove trailing newlines to avoid off-by-one issues with the highlighter
+    if left_block.ends_with('\n') {
+      left_block.pop();
+    }
+    if right_block.ends_with('\n') {
+      right_block.pop();
+    }
+
     let left_hl = self.highlighter.highlight_lang(lang, &left_block)?;
     let right_hl = self.highlighter.highlight_lang(lang, &right_block)?;
 
     for (row_idx, line_idx) in left_map {
-      if let Some(line) = left_hl.get(line_idx).cloned()
+      if let Some(line) = left_hl.get(line_idx)
         && let RenderRow::SideBySide(r) = &mut rows[row_idx]
         && let Some(t) = &temps[row_idx]
       {
         if let Some(inline) = &t.left_inline {
-          r.left_spans =
-            Self::merge_inline_with_syntax(inline, Some(&line), crate::diff::Kind::Remove);
+          r.left_spans = Self::merge_inline_with_syntax(inline, line);
         } else {
-          r.left_spans = line;
+          r.left_spans = line.clone();
         }
       }
     }
     for (row_idx, line_idx) in right_map {
-      if let Some(line) = right_hl.get(line_idx).cloned()
+      if let Some(line) = right_hl.get(line_idx)
         && let RenderRow::SideBySide(r) = &mut rows[row_idx]
         && let Some(t) = &temps[row_idx]
       {
         if let Some(inline) = &t.right_inline {
-          r.right_spans =
-            Self::merge_inline_with_syntax(inline, Some(&line), crate::diff::Kind::Add);
+          r.right_spans = Self::merge_inline_with_syntax(inline, line);
         } else {
-          r.right_spans = line;
+          r.right_spans = line.clone();
         }
       }
     }
