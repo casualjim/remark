@@ -1,3 +1,8 @@
+## [0.4.2] - 2026-01-25
+
+### 🐛 Bug Fixes
+
+- Preserve bold styling for files with unresolved comments when reviewed
 ## [0.4.1] - 2026-01-24
 
 ### 🐛 Bug Fixes
@@ -8,6 +13,11 @@
 ### 🎨 Styling
 
 - Apply formatting fixes
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.4.1 [ci skip]
+- Release remark version 0.4.1
 ## [0.4.0] - 2026-01-23
 
 ### 🚀 Features
