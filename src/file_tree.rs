@@ -212,4 +212,30 @@ mod tests {
     assert_eq!(view.file_at_row(2), Some(2)); // ui.rs
     assert_eq!(view.file_at_row(3), Some(0)); // README.md
   }
+
+  #[test]
+  fn navigation_through_directories() {
+    let files = vec![fe("abc/first.rs"), fe("plo/second.rs"), fe("mod.rs")];
+    let view = FileTreeView::build(&files);
+
+    eprintln!(
+      "Labels: {:?}",
+      view
+        .rows
+        .iter()
+        .map(|r| r.label.as_str())
+        .collect::<Vec<_>>()
+    );
+    eprintln!("file_to_row: {:?}", view.file_to_row);
+
+    // Test navigation order
+    let first_row = view.file_to_row[0]; // first.rs
+    let next1 = view.next_file_row(first_row);
+    let next2 = next1.and_then(|r| view.next_file_row(r));
+
+    eprintln!(
+      "From first.rs (row {}): next is {:?}, then {:?}",
+      first_row, next1, next2
+    );
+  }
 }

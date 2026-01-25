@@ -214,10 +214,12 @@ fn draw_files(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
       CommentState::ResolvedOnly => {
         name_style = name_style.add_modifier(Modifier::DIM);
       }
-      CommentState::None => {}
-    }
-    if s.reviewed_files.contains(&e.path) {
-      name_style = name_style.add_modifier(Modifier::DIM);
+      CommentState::None => {
+        // Only apply DIM for reviewed files without unresolved comments
+        if s.reviewed_files.contains(&e.path) {
+          name_style = name_style.add_modifier(Modifier::DIM);
+        }
+      }
     }
     let label = if s.reviewed_files.contains(&e.path) {
       mark_reviewed_label(&row.label)
