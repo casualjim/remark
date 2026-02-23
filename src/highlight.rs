@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
+use std::str::FromStr;
 
 use syntastica::language_set::SupportedLanguage;
 use syntastica::style::Style as SynStyle;
 use syntastica::theme::ResolvedTheme;
-use syntastica_parsers::{Lang, LanguageSetImpl};
+use syntastica_parsers_git::{Lang, LanguageSetImpl};
 
 pub struct Highlighter {
   language_set: LanguageSetImpl,
@@ -29,7 +30,6 @@ impl Highlighter {
     for line in themed {
       let mut spans = Vec::with_capacity(line.len());
       for (chunk, style) in line {
-        // Strip trailing newlines/carriage returns from chunks to avoid extra blank lines
         let chunk = chunk.trim_end_matches(['\n', '\r']);
         if chunk.is_empty() {
           continue;
@@ -50,22 +50,18 @@ impl Highlighter {
   }
 
   pub fn detect_file_lang(&self, repo: &gix::Repository, repo_relative_path: &str) -> Option<Lang> {
-    if let Some(lang) = resolve_lang_token(repo_relative_path, &self.language_set) {
-      return Some(lang);
-    }
-
     if let Some(wt) = repo.workdir() {
       let abs = wt.join(repo_relative_path);
       if abs.is_file()
-        && let Ok(Some(d)) = hyperpolyglot::detect(&abs)
-        && let Some(lang) = resolve_lang_token(d.language(), &self.language_set)
-      {
-        return Some(lang);
-      }
+        && let Ok(content) = std::fs::read_to_string(&abs) {
+          let file_type = palate::detect(&abs, &content);
+          if let Some(lang) = Lang::for_file_type(file_type, &self.language_set) {
+            return Some(lang);
+          }
+        }
     }
 
-    // Fallback: extension/name based detection (e.g. `Cargo.toml`, `.zshrc`, etc).
-    Lang::for_injection(repo_relative_path, &self.language_set)
+    resolve_lang_token(repo_relative_path, &self.language_set)
   }
 
   #[allow(dead_code)]
@@ -107,96 +103,22 @@ fn resolve_lang_token(info: &str, language_set: &LanguageSetImpl) -> Option<Lang
     return None;
   }
 
-  // Prefer hyperpolyglot detection without hardcoding alias tables.
-  //
-  // Note: `hyperpolyglot::detect()` will sometimes attempt to open the path if an extension is
-  // ambiguous. To keep extension-based detection working even when the actual file isn't present
-  // (e.g. deleted files in a staged diff), fall back to probing a tiny temp file by extension.
-  let mut candidates: Vec<String> = Vec::new();
-  if let Some(name) = hyperpolyglot_name_for_token(raw) {
-    candidates.push(name);
-  }
-  candidates.push(raw.to_string());
-
-  candidates.retain(|s| !s.trim().is_empty());
-  candidates.dedup();
-
-  for candidate in candidates {
-    let candidate = candidate.to_ascii_lowercase();
-    if let Ok(lang) =
-      <Lang as SupportedLanguage<'_, LanguageSetImpl>>::for_name(candidate.as_str(), language_set)
-    {
+  if let Ok(file_type) = palate::FileType::from_str(raw)
+    && let Some(lang) = Lang::for_file_type(file_type, language_set) {
       return Some(lang);
     }
-    if let Some(lang) = <Lang as SupportedLanguage<'_, LanguageSetImpl>>::for_injection(
-      candidate.as_str(),
-      language_set,
-    ) {
-      return Some(lang);
-    }
+
+  let candidate = raw.to_ascii_lowercase();
+  if let Ok(lang) =
+    <Lang as SupportedLanguage<'_, LanguageSetImpl>>::for_name(candidate.as_str(), language_set)
+  {
+    return Some(lang);
   }
-
-  None
-}
-
-fn hyperpolyglot_name_for_token(raw: &str) -> Option<String> {
-  let probes = [raw.to_string(), format!("file.{raw}")];
-  for probe in probes {
-    match hyperpolyglot::detect(std::path::Path::new(&probe)) {
-      Ok(Some(d)) => return Some(d.language().to_string()),
-      Ok(None) => {}
-      Err(_) => {
-        if let Some(name) = hyperpolyglot_name_via_tempfile(&probe) {
-          return Some(name);
-        }
-      }
-    }
-  }
-  None
-}
-
-fn hyperpolyglot_name_via_tempfile(probe: &str) -> Option<String> {
-  use std::io::Write;
-
-  let ext = std::path::Path::new(probe)
-    .extension()?
-    .to_str()?
-    .to_ascii_lowercase();
-  if ext.is_empty() {
-    return None;
-  }
-
-  let base = format!(
-    "remark-hyperpolyglot-probe-{}-{}",
-    std::process::id(),
-    std::time::SystemTime::now()
-      .duration_since(std::time::UNIX_EPOCH)
-      .ok()?
-      .as_nanos()
-  );
-
-  for attempt in 0..8u8 {
-    let name = format!("{base}-{attempt}.{ext}");
-    let path = std::env::temp_dir().join(name);
-    let created = std::fs::OpenOptions::new()
-      .write(true)
-      .create_new(true)
-      .open(&path);
-    let mut file = match created {
-      Ok(f) => f,
-      Err(_) => continue,
-    };
-
-    // Empty content can lead to unreliable classification for ambiguous extensions; give it a
-    // tiny hint without hardcoding language tables.
-    let _ = file.write_all(b"\n");
-
-    let res = hyperpolyglot::detect(&path)
-      .ok()
-      .flatten()
-      .map(|d| d.language().to_string());
-    let _ = std::fs::remove_file(&path);
-    return res;
+  if let Some(lang) = <Lang as SupportedLanguage<'_, LanguageSetImpl>>::for_injection(
+    candidate.as_str(),
+    language_set,
+  ) {
+    return Some(lang);
   }
 
   None
