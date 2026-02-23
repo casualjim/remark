@@ -3,6 +3,11 @@
 ### 🐛 Bug Fixes
 
 - Preserve bold styling for files with unresolved comments when reviewed
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.4.2 [ci skip]
+- Release remark version 0.4.2
 ## [0.4.1] - 2026-01-24
 
 ### 🐛 Bug Fixes
