@@ -53,12 +53,13 @@ impl Highlighter {
     if let Some(wt) = repo.workdir() {
       let abs = wt.join(repo_relative_path);
       if abs.is_file()
-        && let Ok(content) = std::fs::read_to_string(&abs) {
-          let file_type = palate::detect(&abs, &content);
-          if let Some(lang) = Lang::for_file_type(file_type, &self.language_set) {
-            return Some(lang);
-          }
+        && let Ok(content) = std::fs::read_to_string(&abs)
+      {
+        let file_type = palate::detect(&abs, &content);
+        if let Some(lang) = Lang::for_file_type(file_type, &self.language_set) {
+          return Some(lang);
         }
+      }
     }
 
     resolve_lang_token(repo_relative_path, &self.language_set)
@@ -104,9 +105,10 @@ fn resolve_lang_token(info: &str, language_set: &LanguageSetImpl) -> Option<Lang
   }
 
   if let Ok(file_type) = palate::FileType::from_str(raw)
-    && let Some(lang) = Lang::for_file_type(file_type, language_set) {
-      return Some(lang);
-    }
+    && let Some(lang) = Lang::for_file_type(file_type, language_set)
+  {
+    return Some(lang);
+  }
 
   let candidate = raw.to_ascii_lowercase();
   if let Ok(lang) =
