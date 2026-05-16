@@ -230,6 +230,8 @@ struct App {
   current_file_path: Option<String>,
 
   highlighter: Highlighter,
+
+  needs_clear: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -424,6 +426,7 @@ impl App {
       current_diff_lines: Vec::new(),
       current_file_path: None,
       highlighter,
+      needs_clear: false,
     };
     app.reload_view()?;
     app.apply_jump_target()?;
@@ -490,6 +493,11 @@ impl App {
       }
       self.clamp_file_scroll();
       self.clamp_diff_scroll();
+
+      if self.needs_clear {
+        ui.clear_screen()?;
+        self.needs_clear = false;
+      }
 
       ui.terminal
         .draw(|f| {
@@ -1615,6 +1623,7 @@ impl App {
       })
       .unwrap_or(0);
     self.diff_scroll = 0;
+    self.needs_clear = true;
     self.recompute_diff_metrics(self.diff_viewport_width);
     self.status = path;
     Ok(())
@@ -2936,6 +2945,7 @@ mod tests {
       current_diff_lines: Vec::new(),
       current_file_path: None,
       highlighter: Highlighter::new().expect("highlighter"),
+      needs_clear: false,
     }
   }
 

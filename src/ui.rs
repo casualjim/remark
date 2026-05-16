@@ -55,6 +55,11 @@ impl Ui {
     })
   }
 
+  pub fn clear_screen(&mut self) -> Result<()> {
+    self.terminal.clear().context("clear terminal")?;
+    Ok(())
+  }
+
   pub fn restore(&mut self) -> Result<()> {
     disable_raw_mode().ok();
     if self.keyboard_enhancements {
@@ -180,7 +185,6 @@ fn draw_files(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
 
   let inner = block.inner(area);
   f.render_widget(block, area);
-  f.render_widget(Clear, inner);
 
   let view_height = inner.height.max(1) as usize;
   let scroll = s.file_scroll as usize;
@@ -306,7 +310,6 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
 
   let inner = block.inner(area);
   f.render_widget(block, area);
-  f.render_widget(Clear, inner);
 
   let old_max = s
     .diff_rows
