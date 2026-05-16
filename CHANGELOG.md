@@ -1,3 +1,14 @@
+## [0.5.0] - 2026-05-16
+
+### 🐛 Bug Fixes
+
+- *(deps)* Upgrade ratatui 0.30, rename syntastica to verdant, fix stale TUI
+## [0.4.3] - 2026-02-23
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.4.3 [ci skip]
+- Release remark version 0.4.3
 ## [0.4.2] - 2026-01-25
 
 ### 🐛 Bug Fixes
