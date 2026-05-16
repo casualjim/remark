@@ -1,0 +1,43 @@
+"commandPolicies": [
+    {
+      "name": "no-cargo-check",
+      "blocked": [
+        "cargo",
+        "check"
+      ],
+      "message": "Use `mise format` instead of `cargo check`."
+    },
+    {
+      "name": "no-cargo-test",
+      "blocked": [
+        "cargo",
+        "test"
+      ],
+      "message": "Use `mise test` or `mise run test` instead of `cargo test`."
+    },
+    {
+      "name": "no-cargo-nextest",
+      "blocked": [
+        "cargo",
+        "nextest"
+      ],
+      "message": "Use `mise test` or `mise run --force test` instead of `cargo nextest`."
+    },
+    {
+      "name": "no-cargo-fmt",
+      "blocked": [
+        "cargo",
+        "fmt"
+      ],
+      "message": "Use `mise format` instead of `cargo fmt`."
+    },
+    {
+      "name": "no-cargo-clippy",
+      "blocked": [
+        "cargo",
+        "clippy"
+      ],
+      "message": "Use `mise format` instead of `cargo clippy`."
+    }
+  ]
+}

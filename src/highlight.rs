@@ -3,10 +3,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use std::str::FromStr;
 
-use syntastica::language_set::SupportedLanguage;
-use syntastica::style::Style as SynStyle;
-use syntastica::theme::ResolvedTheme;
-use syntastica_parsers_git::{Lang, LanguageSetImpl};
+use verdant::language_set::SupportedLanguage;
+use verdant::style::Style as SynStyle;
+use verdant::theme::ResolvedTheme;
+use verdant_parsers_git::{Lang, LanguageSetImpl};
 
 pub struct Highlighter {
   language_set: LanguageSetImpl,
@@ -17,14 +17,14 @@ impl Highlighter {
   pub fn new() -> Result<Self> {
     Ok(Self {
       language_set: LanguageSetImpl::new(),
-      theme: syntastica_themes::catppuccin::mocha(),
+      theme: verdant_themes::catppuccin::mocha(),
     })
   }
 
   pub fn highlight_lang(&self, lang: Lang, text: &str) -> Result<Vec<Vec<Span<'static>>>> {
-    let highlights = syntastica::Processor::process_once(text, lang, &self.language_set)
-      .context("syntastica process")?;
-    let themed = syntastica::renderer::resolve_styles(&highlights, &self.theme);
+    let highlights = verdant::Processor::process_once(text, lang, &self.language_set)
+      .context("verdant process")?;
+    let themed = verdant::renderer::resolve_styles(&highlights, &self.theme);
 
     let mut lines = Vec::with_capacity(themed.len());
     for line in themed {

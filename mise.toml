@@ -4,10 +4,17 @@ experimental = true
 [tools]
 hk = "latest"
 pkl = "latest"
-rust = "latest"
+sops = "latest"
+
+[tools.rust]
+version = "latest"
+profile = "default"
+components = "llvm-tools,rust-analyzer"
 
 [env]
 _.file = ".env.json"
+SYNTASTICA_PARSERS_CACHE_DIR = "{{ env.HOME }}/.cache/syntastica-parsers"
+SYNTASTICA_PARSERS_CLONE_DIR = "{{ env.HOME }}/.cache/syntastica-parsers-clone"
 
 [tasks.test]
 run = "cargo test --all"

@@ -23,7 +23,7 @@ Terminal-first code review notes for Git repos.
   - Side-by-side (only for modified files; added/deleted fall back to unified)
   - Unified ("stacked")
   - Mode persists in `.git/config` as `remark.diffView`
-- **Per-file syntax highlighting** on diff code lines using `syntastica` + `hyperpolyglot` language detection.
+- **Per-file syntax highlighting** on diff code lines using `verdant` + `palate` language detection.
 - **Comment markers**: unresolved comments show `💬` and resolved comments show `✓`.
 - **Resolve comments**: resolve/unresolve individual comments so your prompt only contains actionable items.
 - **Git notes storage**: comments are stored under a notes ref (default: `refs/notes/remark`).
@@ -433,7 +433,7 @@ Core libraries used:
 - `ratatui` + `crossterm` for TUI rendering/input
 - `gix` for repository access (status, trees, objects, notes ref updates)
 - `gix-diff` for unified diff generation
-- `syntastica` + `syntastica-parsers` + `syntastica-themes` for syntax highlighting
+- `verdant` + `verdant-parsers-git` + `verdant-themes` for syntax highlighting
 - `hyperpolyglot` for language detection
 - `copypasta` (desktop clipboard) + OSC52 fallback (remote clipboard-friendly)
 

@@ -30,7 +30,7 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 confique = { version = "0.4.0", features = ["toml", "json5", "yaml"] }
 copypasta = "0.10"
-crossterm = "0.28"
+crossterm = "0.29"
 dirs = "6"
 gix = { version = "0.77", features = ["revision", "tree-editor"] }
 gix-actor = "0.37.0"
@@ -43,19 +43,19 @@ ignore = "0.4"
 mimalloc = "0.1.48"
 notify = "8"
 palate = "0.3"
-ratatui = "0.29"
+ratatui = "0.30"
+ratatui-textarea = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 similar = { version = "2.7", features = ["text", "inline", "unicode"] }
 smallvec = "1"
-syntastica = { git = "https://github.com/casualjim/syntastica", branch = "expand-languages-git-deploy" }
-syntastica-parsers-git = { git = "https://github.com/casualjim/syntastica", branch = "expand-languages-git-deploy", features = ["all"] }
-syntastica-themes = { git = "https://github.com/casualjim/syntastica", branch = "expand-languages-git-deploy" }
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "io-std", "io-util", "macros", "sync", "time"] }
 tower-lsp = "0.20"
-tui-textarea = "0.7"
-unicode-width = "0.2"
+unicode-width = "0.2.2"
+verdant = { git = "https://github.com/casualjim/verdant", branch = "main-git-deploy" }
+verdant-parsers-git = { git = "https://github.com/casualjim/verdant", branch = "main-git-deploy", features = ["all"] }
+verdant-themes = { git = "https://github.com/casualjim/verdant", branch = "main-git-deploy" }
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 wl-clipboard-rs = "0.9"
