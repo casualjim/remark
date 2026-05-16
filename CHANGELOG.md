@@ -1,8 +1,18 @@
+## [0.5.1] - 2026-05-16
+
+### 🐛 Bug Fixes
+
+- *(tui)* Force full redraw when switching files or diff views
 ## [0.5.0] - 2026-05-16
 
 ### 🐛 Bug Fixes
 
 - *(deps)* Upgrade ratatui 0.30, rename syntastica to verdant, fix stale TUI
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.5.0 [ci skip]
+- Release remark version 0.5.0
 ## [0.4.3] - 2026-02-23
 
 ### ⚙️ Miscellaneous Tasks
