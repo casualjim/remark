@@ -7,7 +7,7 @@ use crossterm::event::{
 };
 use gix::ObjectId;
 use gix_hash::{Kind, hasher};
-use tui_textarea::TextArea;
+use ratatui_textarea::TextArea;
 
 use crate::file_tree::FileTreeView;
 use crate::git::ViewKind;
@@ -536,10 +536,8 @@ impl App {
 
       if crossterm::event::poll(tick_rate).context("poll events")? {
         match crossterm::event::read().context("read event")? {
-          Event::Key(key) => {
-            if self.handle_key(key)? {
-              break;
-            }
+          Event::Key(key) if self.handle_key(key)? => {
+            break;
           }
           Event::Mouse(m) => {
             self.handle_mouse(m, rects)?;

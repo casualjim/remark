@@ -16,7 +16,7 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
-use tui_textarea::TextArea;
+use ratatui_textarea::TextArea;
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::{
@@ -180,6 +180,7 @@ fn draw_files(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
 
   let inner = block.inner(area);
   f.render_widget(block, area);
+  f.render_widget(Clear, inner);
 
   let view_height = inner.height.max(1) as usize;
   let scroll = s.file_scroll as usize;
@@ -305,6 +306,7 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
 
   let inner = block.inner(area);
   f.render_widget(block, area);
+  f.render_widget(Clear, inner);
 
   let old_max = s
     .diff_rows
@@ -1223,7 +1225,7 @@ fn render_wrapped_textarea(f: &mut ratatui::Frame, area: Rect, textarea: &TextAr
 
 fn wrap_textarea_lines(textarea: &TextArea<'_>, width: u16) -> (Vec<Line<'static>>, usize, usize) {
   let width = width.max(1) as usize;
-  let (cursor_row, cursor_col) = textarea.cursor();
+  let ratatui_textarea::DataCursor(cursor_row, cursor_col) = textarea.cursor();
   let cursor_style = textarea.cursor_style();
 
   let mut out: Vec<Line<'static>> = Vec::new();
