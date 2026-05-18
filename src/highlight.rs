@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use std::str::FromStr;
+use unicode_width::UnicodeWidthChar;
 
 use verdant::language_set::SupportedLanguage;
 use verdant::style::Style as SynStyle;
@@ -29,14 +30,16 @@ impl Highlighter {
     let mut lines = Vec::with_capacity(themed.len());
     for line in themed {
       let mut spans = Vec::with_capacity(line.len());
+      let mut column = 0usize;
       for (chunk, style) in line {
         let chunk = chunk.trim_end_matches(['\n', '\r']);
         if chunk.is_empty() {
           continue;
         }
+        let content = expand_tabs(chunk, &mut column);
         let span = match style {
-          Some(s) => Span::styled(chunk.to_string(), syn_style_to_tui(&s)),
-          None => Span::raw(chunk.to_string()),
+          Some(s) => Span::styled(content, syn_style_to_tui(&s)),
+          None => Span::raw(content),
         };
         spans.push(span);
       }
@@ -72,6 +75,27 @@ impl Highlighter {
       lines.into_iter().map(Line::from).collect::<Vec<_>>(),
     ))
   }
+}
+
+fn expand_tabs(text: &str, column: &mut usize) -> String {
+  const TAB_WIDTH: usize = 4;
+
+  let mut expanded = String::with_capacity(text.len());
+  for ch in text.chars() {
+    if ch == '\t' {
+      let spaces = TAB_WIDTH - (*column % TAB_WIDTH);
+      expanded.push_str(&" ".repeat(spaces));
+      *column += spaces;
+    } else {
+      expanded.push(ch);
+      if ch == '\n' || ch == '\r' {
+        *column = 0;
+      } else {
+        *column += UnicodeWidthChar::width(ch).unwrap_or(0);
+      }
+    }
+  }
+  expanded
 }
 
 fn syn_style_to_tui(style: &SynStyle) -> Style {
@@ -129,6 +153,16 @@ fn resolve_lang_token(info: &str, language_set: &LanguageSetImpl) -> Option<Lang
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn expands_tabs_to_visible_tab_stops() {
+    let mut column = 0;
+
+    assert_eq!(expand_tabs("ab\t", &mut column), "ab  ");
+    assert_eq!(column, 4);
+    assert_eq!(expand_tabs("\tcd", &mut column), "    cd");
+    assert_eq!(column, 10);
+  }
 
   #[test]
   fn resolves_ts_and_tsx() {
