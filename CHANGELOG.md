@@ -1,8 +1,18 @@
+## [0.5.2] - 2026-05-18
+
+### 🐛 Bug Fixes
+
+- Render tabs in highlighted code
 ## [0.5.1] - 2026-05-16
 
 ### 🐛 Bug Fixes
 
 - *(tui)* Force full redraw when switching files or diff views
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.5.1 [ci skip]
+- Release remark version 0.5.1
 ## [0.5.0] - 2026-05-16
 
 ### 🐛 Bug Fixes
