@@ -2953,6 +2953,43 @@ mod tests {
   }
 
   #[test]
+  fn proves_decorated_go_rows_keep_expanded_tabs() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let repo = gix::init(td.path()).expect("init repo");
+    std::fs::write(
+      td.path().join("main.go"),
+      "func main() {\n\tif ok {\n\t\treturn\n\t}\n}\n",
+    )
+    .expect("write go");
+    let app = test_app(repo);
+
+    let rows = app
+      .build_decorated_rows(
+        "main.go",
+        None,
+        Some("func main() {\n\tif ok {\n\t\treturn\n\t}\n}\n"),
+      )
+      .expect("decorated rows");
+    let rendered: Vec<String> = rows
+      .into_iter()
+      .filter_map(|row| match row {
+        RenderRow::Decorated(r) => Some(
+          r.spans
+            .into_iter()
+            .map(|span| span.content.to_string())
+            .collect(),
+        ),
+        _ => None,
+      })
+      .collect();
+
+    assert_eq!(rendered[1], "  if ok {");
+    assert_eq!(rendered[2], "    return");
+    assert_eq!(rendered[3], "  }");
+    assert!(!rendered.iter().any(|line| line.contains('\t')));
+  }
+
+  #[test]
   fn diff_metrics_account_for_marker_width() {
     let td = tempfile::tempdir().expect("tempdir");
     let repo = gix::init(td.path()).expect("init repo");

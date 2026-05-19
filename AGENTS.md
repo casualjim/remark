@@ -38,7 +38,10 @@
 - Commit messages follow Conventional Commits (examples: `feat: ...`, `fix: ...`, `chore: ...`, `refactor: ...`, `test: ...`).
 - PRs should include: a clear description, rationale, and any user-facing behavior changes.
 - Release bump tokens are read from PR title/body: `bump:major`, `bump:minor`, or `bump:patch`. If none are present, the release defaults to `bump:patch`. If multiple tokens are present, the highest wins (major > minor > patch).
-- Agents creating PRs with the `gh` client must include the bump token in the PR body.
+- CRITICAL: Agents must not choose release bump levels.
+- Never add `bump:major`, `bump:minor`, or `bump:patch` to PR titles or PR bodies unless the user explicitly provides that exact token in the current request.
+- If the user asks to create/merge/shepherd a PR through release and does not specify a bump token, omit all bump tokens and allow the repository default behavior to apply.
+- Before creating any PR, inspect the title/body and confirm it contains no bump token unless explicitly requested.
 - Ensure CI passes (`fmt`, `clippy`, `test`) before merging.
 - CRITICAL: Do not create commits unless the user explicitly asks. Always confirm before staging or committing changes.
 
