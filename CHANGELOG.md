@@ -1,8 +1,18 @@
+## [0.6.1] - 2026-05-19
+
+### 🧪 Testing
+
+- Cover Go tab rendering
 ## [0.6.0] - 2026-05-19
 
 ### 🚀 Features
 
 - Configure tab width
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.6.0 [ci skip]
+- Release remark version 0.6.0
 ## [0.5.2] - 2026-05-18
 
 ### 🐛 Bug Fixes
