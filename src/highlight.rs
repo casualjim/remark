@@ -12,13 +12,15 @@ use verdant_parsers_git::{Lang, LanguageSetImpl};
 pub struct Highlighter {
   language_set: LanguageSetImpl,
   theme: ResolvedTheme,
+  tab_width: usize,
 }
 
 impl Highlighter {
-  pub fn new() -> Result<Self> {
+  pub fn new(tab_width: usize) -> Result<Self> {
     Ok(Self {
       language_set: LanguageSetImpl::new(),
       theme: verdant_themes::catppuccin::mocha(),
+      tab_width: tab_width.max(1),
     })
   }
 
@@ -36,7 +38,7 @@ impl Highlighter {
         if chunk.is_empty() {
           continue;
         }
-        let content = expand_tabs(chunk, &mut column);
+        let content = expand_tabs(chunk, &mut column, self.tab_width);
         let span = match style {
           Some(s) => Span::styled(content, syn_style_to_tui(&s)),
           None => Span::raw(content),
@@ -77,13 +79,12 @@ impl Highlighter {
   }
 }
 
-fn expand_tabs(text: &str, column: &mut usize) -> String {
-  const TAB_WIDTH: usize = 4;
-
+fn expand_tabs(text: &str, column: &mut usize, tab_width: usize) -> String {
+  let tab_width = tab_width.max(1);
   let mut expanded = String::with_capacity(text.len());
   for ch in text.chars() {
     if ch == '\t' {
-      let spaces = TAB_WIDTH - (*column % TAB_WIDTH);
+      let spaces = tab_width - (*column % tab_width);
       expanded.push_str(&" ".repeat(spaces));
       *column += spaces;
     } else {
@@ -158,10 +159,18 @@ mod tests {
   fn expands_tabs_to_visible_tab_stops() {
     let mut column = 0;
 
-    assert_eq!(expand_tabs("ab\t", &mut column), "ab  ");
+    assert_eq!(expand_tabs("ab\t", &mut column, 4), "ab  ");
     assert_eq!(column, 4);
-    assert_eq!(expand_tabs("\tcd", &mut column), "    cd");
+    assert_eq!(expand_tabs("\tcd", &mut column, 4), "    cd");
     assert_eq!(column, 10);
+  }
+
+  #[test]
+  fn expands_tabs_with_configured_width() {
+    let mut column = 0;
+
+    assert_eq!(expand_tabs("a\tb", &mut column, 2), "a b");
+    assert_eq!(column, 3);
   }
 
   #[test]
@@ -180,7 +189,7 @@ mod tests {
     std::fs::create_dir_all(td.path().join("src")).expect("mkdir src");
     std::fs::write(td.path().join("src/example.ts"), "const x: number = 1;\n").expect("write ts");
 
-    let hl = Highlighter::new().expect("highlighter");
+    let hl = Highlighter::new(2).expect("highlighter");
     let lang = hl.detect_file_lang(&repo, "src/example.ts");
     assert!(lang.is_some());
   }
