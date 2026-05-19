@@ -96,6 +96,7 @@ fn main() -> anyhow::Result<()> {
         show_ignored,
         view,
         jump_target,
+        tab_width: cfg.tab_width,
       };
       app::run(repo, options)
     }

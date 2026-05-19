@@ -18,6 +18,8 @@ pub struct AppConfig {
   pub show_ignored: bool,
   #[config(default = true, env = "REMARK_FETCH_NOTES")]
   pub fetch_notes: bool,
+  #[config(default = 2, env = "REMARK_TAB_WIDTH")]
+  pub tab_width: usize,
 }
 
 #[derive(Parser)]

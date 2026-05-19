@@ -33,6 +33,7 @@ pub(crate) struct UiOptions {
   pub(crate) show_ignored: bool,
   pub(crate) view: ViewKind,
   pub(crate) jump_target: Option<JumpTarget>,
+  pub(crate) tab_width: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,6 +129,7 @@ pub fn run(repo: gix::Repository, options: UiOptions) -> Result<()> {
       options.show_ignored,
       options.view,
       options.jump_target,
+      options.tab_width,
     )?;
     app.run_loop(&mut ui)
   })();
@@ -371,8 +373,9 @@ impl App {
     show_ignored: bool,
     view: ViewKind,
     jump_target: Option<JumpTarget>,
+    tab_width: usize,
   ) -> Result<Self> {
-    let highlighter = Highlighter::new()?;
+    let highlighter = Highlighter::new(tab_width)?;
     // Always default to Decorated view; users can switch with 'd' key
     let diff_view_mode = DiffViewMode::Decorated;
     let diff_context = match crate::git::read_local_config_value(&repo, CONFIG_DIFF_CONTEXT_KEY)
@@ -2944,7 +2947,7 @@ mod tests {
       current_after: None,
       current_diff_lines: Vec::new(),
       current_file_path: None,
-      highlighter: Highlighter::new().expect("highlighter"),
+      highlighter: Highlighter::new(2).expect("highlighter"),
       needs_clear: false,
     }
   }
