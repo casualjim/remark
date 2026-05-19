@@ -174,6 +174,54 @@ mod tests {
   }
 
   #[test]
+  fn proves_go_highlighting_expands_indent_tabs() {
+    let language_set = LanguageSetImpl::new();
+    let lang = resolve_lang_token("go", &language_set).expect("go language is detected");
+    let hl = Highlighter::new(2).expect("highlighter");
+
+    let lines = hl
+      .highlight_lang(lang, "func main() {\n\tif ok {\n\t\treturn\n\t}\n}\n")
+      .expect("highlight go");
+    let rendered: Vec<String> = lines
+      .into_iter()
+      .map(|line| {
+        line
+          .into_iter()
+          .map(|span| span.content.to_string())
+          .collect()
+      })
+      .collect();
+
+    assert_eq!(rendered[1], "  if ok {");
+    assert_eq!(rendered[2], "    return");
+    assert_eq!(rendered[3], "  }");
+    assert!(!rendered.iter().any(|line| line.contains('\t')));
+  }
+
+  #[test]
+  fn proves_go_alignment_tabs_use_the_configured_width() {
+    let language_set = LanguageSetImpl::new();
+    let lang = resolve_lang_token("go", &language_set).expect("go language is detected");
+    let hl = Highlighter::new(2).expect("highlighter");
+
+    let lines = hl
+      .highlight_lang(lang, "var (\n\tshort\t= 1\n\tlonger\t= 2\n)\n")
+      .expect("highlight go");
+    let rendered: Vec<String> = lines
+      .into_iter()
+      .map(|line| {
+        line
+          .into_iter()
+          .map(|span| span.content.to_string())
+          .collect()
+      })
+      .collect();
+
+    assert_eq!(rendered[1], "  short = 1");
+    assert_eq!(rendered[2], "  longer  = 2");
+  }
+
+  #[test]
   fn resolves_ts_and_tsx() {
     let language_set = LanguageSetImpl::new();
     assert!(resolve_lang_token("ts", &language_set).is_some());
