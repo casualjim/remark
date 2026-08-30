@@ -2,6 +2,7 @@ mod add_cmd;
 mod app;
 mod clipboard;
 mod config;
+mod delta_style;
 mod diff;
 mod file_tree;
 mod git;

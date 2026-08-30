@@ -499,6 +499,25 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
         spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
         spans.extend(r.spans.iter().cloned());
 
+        // Delta-style: the tint runs to the end of the row.
+        if let Some(bg) = match r.kind {
+          crate::diff::Kind::Remove => Some(crate::delta_style::MINUS_BG),
+          crate::diff::Kind::Add => Some(crate::delta_style::PLUS_BG),
+          _ => None,
+        } {
+          let code_w: usize = r
+            .spans
+            .iter()
+            .flat_map(|sp| sp.content.chars())
+            .map(|c| c.width().unwrap_or(0))
+            .sum();
+          let used = old_w + new_w + 7 + code_w;
+          let pad = (inner.width as usize).saturating_sub(used);
+          if pad > 0 {
+            spans.push(Span::styled(" ".repeat(pad), Style::default().bg(bg)));
+          }
+        }
+
         let mut style = Style::default();
         if abs_idx == s.diff_cursor {
           style = style.add_modifier(Modifier::REVERSED);
@@ -526,28 +545,48 @@ fn draw_diff(f: &mut ratatui::Frame, area: Rect, s: &DrawState<'_>) {
           _ => ("  ", Style::default().fg(Color::Reset)),
         };
 
-        // Git status marker and line number
-        let (git_marker, git_style) = match r.status {
-          crate::diff::LineStatus::Unchanged => (" ", Style::default().fg(Color::Reset)),
-          crate::diff::LineStatus::Added => ("+", Style::default().fg(Color::Green)),
-          crate::diff::LineStatus::Removed => ("-", Style::default().fg(Color::Red)),
-          crate::diff::LineStatus::Modified => ("~", Style::default().fg(Color::Yellow)),
-        };
-
         let line_s = if r.line_number > 0 {
           format!("{:>new_w$}", r.line_number)
         } else {
           " ".repeat(new_w)
         };
 
+        // Delta-style tints live on the spans themselves (incl. word
+        // emphasis); row_bg only paints the end-of-line pad.
+        let row_bg = match r.status {
+          crate::diff::LineStatus::Added => Some(crate::delta_style::PLUS_BG),
+          crate::diff::LineStatus::Removed => Some(crate::delta_style::MINUS_BG),
+          _ => None,
+        };
+
         let mut spans: Vec<Span<'static>> = Vec::with_capacity(5 + r.spans.len());
         spans.push(Span::styled(marker.to_string(), marker_style));
         spans.push(Span::raw(" "));
         spans.push(Span::styled(line_s, Style::default().fg(Color::DarkGray)));
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(git_marker.to_string(), git_style));
         spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
-        spans.extend(r.spans.iter().cloned());
+        for sp in &r.spans {
+          let style = if sp.style.bg.is_some() {
+            sp.style
+          } else if let Some(bg) = row_bg {
+            sp.style.bg(bg)
+          } else {
+            sp.style
+          };
+          spans.push(Span::styled(sp.content.clone(), style));
+        }
+        if let Some(bg) = row_bg {
+          let code_w: usize = r
+            .spans
+            .iter()
+            .flat_map(|sp| sp.content.chars())
+            .map(|c| c.width().unwrap_or(0))
+            .sum();
+          let used = new_w + 6 + code_w;
+          let pad = (inner.width as usize).saturating_sub(used);
+          if pad > 0 {
+            spans.push(Span::styled(" ".repeat(pad), Style::default().bg(bg)));
+          }
+        }
 
         let mut style = Style::default();
         if abs_idx == s.diff_cursor {
@@ -651,13 +690,22 @@ fn render_side_by_side_line(
   let left_code_w = avail / 2;
   let right_code_w = avail.saturating_sub(left_code_w);
 
+  let left_pad_style = match row.left_kind {
+    Some(crate::diff::Kind::Remove) => Style::default().bg(crate::delta_style::MINUS_BG),
+    _ => Style::default(),
+  };
+  let right_pad_style = match row.right_kind {
+    Some(crate::diff::Kind::Add) => Style::default().bg(crate::delta_style::PLUS_BG),
+    _ => Style::default(),
+  };
+
   let (mut left_code, left_used) = spans_truncate_to_width(&left_spans, left_code_w);
   if left_used < left_code_w {
-    left_code.push(pad_spaces(left_code_w - left_used, Style::default()));
+    left_code.push(pad_spaces(left_code_w - left_used, left_pad_style));
   }
   let (mut right_code, right_used) = spans_truncate_to_width(&right_spans, right_code_w);
   if right_used < right_code_w {
-    right_code.push(pad_spaces(right_code_w - right_used, Style::default()));
+    right_code.push(pad_spaces(right_code_w - right_used, right_pad_style));
   }
 
   let mut spans: Vec<Span<'static>> = Vec::with_capacity(12 + left_code.len() + right_code.len());

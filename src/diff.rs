@@ -36,6 +36,20 @@ pub struct Line {
   pub inline_spans: Option<Vec<InlineSpan>>,
 }
 
+/// Clean word-diff emphasis: common leading whitespace is never emphasized
+/// (similar's positional pairing can mark it as inserted when it pairs a line
+/// against a differently-indented partner; delta never paints it).
+fn clean_inline_spans(mut spans: Vec<InlineSpan>) -> Vec<InlineSpan> {
+  for span in &mut spans {
+    if span.emphasized && span.text.chars().all(char::is_whitespace) {
+      span.emphasized = false;
+    } else {
+      break;
+    }
+  }
+  spans
+}
+
 pub fn unified_file_diff(
   before_label: &str,
   after_label: &str,
@@ -112,14 +126,26 @@ pub fn unified_file_diff(
           })
           .collect();
 
-        // Build full text with prefix
+        let inline_spans = clean_inline_spans(inline_spans);
+
+        // Build full text with prefix. Concatenate the inline pieces — the
+        // change's Display joins emphasis pieces with '+' separators, which
+        // would poison every offset derived from this text (syntax spans,
+        // gutters).
         let prefix = match kind {
           Kind::Remove => "-",
           Kind::Add => "+",
           Kind::Context => " ",
           _ => "",
         };
-        let full_text = format!("{}{}", prefix, change);
+        let full_text = format!(
+          "{}{}",
+          prefix,
+          inline_spans
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<String>()
+        );
 
         out.push(Line {
           kind,
@@ -245,6 +271,7 @@ pub struct DecoratedLine {
   pub line_number: u32, // Line number in the new file (0 for deleted files or removed lines)
   pub old_line_number: Option<u32>, // Line number in the old file (for reference)
   pub text: String,
+  pub inline_spans: Option<Vec<InlineSpan>>,
 }
 
 /// Returns the full file (new version or old for deleted files) with line-by-line git status
@@ -279,6 +306,7 @@ pub fn decorated_file_diff(
           line_number: (idx + 1) as u32,
           old_line_number: None,
           text: line.to_string(),
+          inline_spans: None,
         })
         .collect(),
     );
@@ -287,34 +315,41 @@ pub fn decorated_file_diff(
   // Use similar to compute line-by-line diff
   let diff = TextDiff::from_lines(before_content, content);
 
-  // Build a map of line status for lines that have changes
+  // Build a map of line status + word-diff emphasis for lines that have changes
   // Use a HashMap to store status by line number (0-based index)
   use std::collections::HashMap;
-  let mut line_changes: HashMap<usize, LineStatus> = HashMap::new();
+  let mut line_changes: HashMap<usize, (LineStatus, Option<Vec<InlineSpan>>)> = HashMap::new();
 
   for op in diff.ops() {
     // Get the changes with inline diff information
     for change in diff.iter_inline_changes(op) {
-      let (status, _old_idx, new_idx) = match change.tag() {
+      let (status, new_idx, inline_spans) = match change.tag() {
         ChangeTag::Equal => {
-          let old_i = change.old_index();
           let new_i = change.new_index();
-          (LineStatus::Unchanged, old_i, new_i)
+          (LineStatus::Unchanged, new_i, None)
         }
         ChangeTag::Delete => {
-          let old_i = change.old_index();
           // Removed line - doesn't exist in new file
-          (LineStatus::Removed, old_i, None)
+          (LineStatus::Removed, None, None)
         }
         ChangeTag::Insert => {
           let new_i = change.new_index();
-          (LineStatus::Added, None, new_i)
+          let spans = clean_inline_spans(
+            change
+              .iter_strings_lossy()
+              .map(|(emphasized, text)| InlineSpan {
+                text: text.into_owned(),
+                emphasized,
+              })
+              .collect(),
+          );
+          (LineStatus::Added, new_i, Some(spans))
         }
       };
 
       // Only store lines that exist in the new file
       if let Some(new_i) = new_idx {
-        line_changes.insert(new_i, status);
+        line_changes.insert(new_i, (status, inline_spans));
       }
     }
   }
@@ -325,10 +360,10 @@ pub fn decorated_file_diff(
   for (idx, line) in lines.iter().enumerate() {
     let line_num = idx + 1; // 1-based line number
 
-    let status = line_changes
+    let (status, inline_spans) = line_changes
       .get(&idx)
-      .copied()
-      .unwrap_or(LineStatus::Unchanged);
+      .cloned()
+      .unwrap_or((LineStatus::Unchanged, None));
 
     result.push(DecoratedLine {
       status,
@@ -339,6 +374,7 @@ pub fn decorated_file_diff(
         None
       },
       text: line.to_string(),
+      inline_spans,
     });
   }
 
@@ -389,5 +425,92 @@ mod tests {
     assert_eq!(lines[0].text, "line1");
     assert_eq!(lines[1].text, "line2-modified");
     assert_eq!(lines[2].text, "line3");
+  }
+
+  #[test]
+  fn inline_spans_mostly_changed_pair_keeps_word_emphasis() {
+    // Mirrors the app.rs:2521 pairing — emphasis marks what actually changed
+    // within the line, even when most of the line changed.
+    let spans = vec![
+      InlineSpan {
+        text: "    use ".into(),
+        emphasized: false,
+      },
+      InlineSpan {
+        text: "crate".into(),
+        emphasized: true,
+      },
+      InlineSpan {
+        text: "::".into(),
+        emphasized: false,
+      },
+      InlineSpan {
+        text: "delta_style".into(),
+        emphasized: true,
+      },
+      InlineSpan {
+        text: "::{MINUS_BG, MINUS_EMPH_BG, PLUS_BG, PLUS_EMPH_BG}".into(),
+        emphasized: true,
+      },
+      InlineSpan {
+        text: ";".into(),
+        emphasized: false,
+      },
+    ];
+    let cleaned = clean_inline_spans(spans);
+    assert!(cleaned[1].emphasized);
+    assert!(cleaned[3].emphasized);
+    assert!(cleaned[4].emphasized);
+    assert!(!cleaned[2].emphasized);
+  }
+
+  #[test]
+  fn inline_spans_leading_whitespace_never_emphasized() {
+    let spans = vec![
+      InlineSpan {
+        text: "          ".into(),
+        emphasized: true,
+      },
+      InlineSpan {
+        text: "r.left_spans = Self::".into(),
+        emphasized: false,
+      },
+      InlineSpan {
+        text: "delta_styled_spans".into(),
+        emphasized: true,
+      },
+      InlineSpan {
+        text: "(inline, line".into(),
+        emphasized: false,
+      },
+      InlineSpan {
+        text: ", kind".into(),
+        emphasized: true,
+      },
+      InlineSpan {
+        text: ");".into(),
+        emphasized: false,
+      },
+    ];
+    let cleaned = clean_inline_spans(spans);
+    assert!(!cleaned[0].emphasized);
+    assert!(cleaned[2].emphasized);
+    assert!(cleaned[4].emphasized);
+  }
+
+  #[test]
+  fn inline_spans_similar_pair_keeps_emphasis() {
+    let spans = vec![
+      InlineSpan {
+        text: "    let x = ".into(),
+        emphasized: false,
+      },
+      InlineSpan {
+        text: "2".into(),
+        emphasized: true,
+      },
+    ];
+    let cleaned = clean_inline_spans(spans);
+    assert!(cleaned[1].emphasized);
   }
 }

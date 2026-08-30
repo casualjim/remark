@@ -1894,12 +1894,6 @@ impl App {
         }
         RenderRow::SideBySide(_) => String::new(),
         RenderRow::Decorated(r) => {
-          let git_marker = match r.status {
-            crate::diff::LineStatus::Unchanged => ' ',
-            crate::diff::LineStatus::Added => '+',
-            crate::diff::LineStatus::Removed => '-',
-            crate::diff::LineStatus::Modified => '~',
-          };
           let line_s = if r.line_number > 0 {
             format!("{:>new_w$}", r.line_number)
           } else {
@@ -1910,8 +1904,8 @@ impl App {
             .iter()
             .map(|s| s.content.as_ref())
             .collect::<String>();
-          // Marker is fixed-width (2 cells).
-          format!("  {line_s} {git_marker} │ {code}")
+          // Marker column is 3 cells (comment marker + space).
+          format!("   {line_s} │ {code}")
         }
         RenderRow::Unified(r) => {
           let diff_prefix = match r.kind {
@@ -1995,13 +1989,12 @@ impl App {
             side: LineSide::New,
             line: r.line_number,
           }
-        } else if let Some(old_line) = r.old_line_number {
+        } else {
+          let old_line = r.old_line_number?;
           CommentLocator::Line {
             side: LineSide::Old,
             line: old_line,
           }
-        } else {
-          return None;
         }
       }
       RenderRow::Section { .. } => return None,
@@ -2493,15 +2486,18 @@ impl App {
       }
 
       let spans = if let Some(hl) = code_by_diff.get(idx).and_then(|o| o.as_ref()) {
-        // Merge inline spans with syntax highlighting if available
-        if let Some(inline_spans) = &dl.inline_spans {
-          Self::merge_inline_with_syntax(inline_spans, hl)
-        } else {
-          hl.clone()
+        match &dl.inline_spans {
+          Some(inline_spans) => Self::delta_styled_spans(inline_spans, hl, dl.kind),
+          None => hl.clone(),
         }
       } else {
-        let text = dl.text.get(1..).unwrap_or("").to_string();
-        vec![ratatui::text::Span::raw(text)]
+        match &dl.inline_spans {
+          Some(inline_spans) => Self::delta_styled_spans(inline_spans, &[], dl.kind),
+          None => {
+            let text = dl.text.get(1..).unwrap_or("").to_string();
+            vec![ratatui::text::Span::raw(text)]
+          }
+        }
       };
       rows.push(RenderRow::Unified(DiffRow {
         kind: dl.kind,
@@ -2514,46 +2510,91 @@ impl App {
     Ok(rows)
   }
 
-  /// Merge inline emphasis (from similar crate) with syntax highlighting.
-  /// If any part is emphasized, adds underline to all syntax spans.
-  fn merge_inline_with_syntax(
+  /// Style code spans the way git-delta does. Add/Remove rows get a background
+  /// tint; emphasized (word-level) segments get the stronger tint. Minus rows
+  /// drop syntax fg (delta renders them plain); plus rows keep syntax fg.
+  fn delta_styled_spans(
     inline_spans: &[crate::diff::InlineSpan],
     syntax_spans: &[ratatui::text::Span<'static>],
+    kind: crate::diff::Kind,
   ) -> Vec<ratatui::text::Span<'static>> {
-    use ratatui::style::Modifier;
+    use crate::delta_style::{MINUS_BG, MINUS_EMPH_BG, PLUS_BG, PLUS_EMPH_BG};
 
-    // Check if any inline span is emphasized
-    let has_emphasis = inline_spans.iter().any(|s| s.emphasized);
+    // Verdict syntax spans carry tab-expanded text; expand inline spans the
+    // same way so char offsets stay aligned.
+    const TAB: &str = "  ";
+    let inline_spans: Vec<crate::diff::InlineSpan> = inline_spans
+      .iter()
+      .map(|p| crate::diff::InlineSpan {
+        text: if p.text.contains('\t') {
+          p.text.replace('\t', TAB)
+        } else {
+          p.text.clone()
+        },
+        emphasized: p.emphasized,
+      })
+      .collect();
 
-    // If no syntax highlighting, create raw spans with underline for emphasized parts
-    if syntax_spans.is_empty() {
-      return inline_spans
-        .iter()
-        .map(|s| {
-          let mut style = ratatui::style::Style::default();
-          if s.emphasized {
-            style = style
-              .add_modifier(Modifier::BOLD)
-              .add_modifier(Modifier::UNDERLINED);
-          }
-          ratatui::text::Span::styled(s.text.clone(), style)
-        })
-        .collect();
+    let (base_bg, emph_bg, keep_syntax) = match kind {
+      crate::diff::Kind::Remove => (MINUS_BG, MINUS_EMPH_BG, false),
+      crate::diff::Kind::Add => (PLUS_BG, PLUS_EMPH_BG, true),
+      _ => return syntax_spans.to_vec(),
+    };
+
+    // Syntax style by char offset into the line.
+    let mut syn_bounds: Vec<(usize, ratatui::style::Style)> = Vec::new();
+    let mut syn_end = 0usize;
+    for s in syntax_spans {
+      let n = s.content.chars().count();
+      if n > 0 {
+        syn_bounds.push((syn_end, s.style));
+      }
+      syn_end += n;
     }
 
-    // Apply syntax highlighting with underline added if any part is emphasized
-    syntax_spans
-      .iter()
-      .map(|span| {
-        let mut style = span.style;
-        if has_emphasis {
-          style = style
-            .add_modifier(Modifier::BOLD)
-            .add_modifier(Modifier::UNDERLINED);
+    let mut out = Vec::new();
+    let mut pos = 0usize; // char offset into the line
+    for part in inline_spans {
+      let line_len = part.text.chars().count();
+      let text = part.text.trim_end_matches('\n');
+      if !text.is_empty() {
+        let bg = if part.emphasized { emph_bg } else { base_bg };
+        if keep_syntax && !syn_bounds.is_empty() {
+          // Split across syntax span boundaries: keep syntax fg, override bg.
+          let total = text.chars().count();
+          let mut start = 0usize;
+          while start < total {
+            let abs = pos + start;
+            let style = syn_bounds
+              .iter()
+              .rev()
+              .find(|(s, _)| *s <= abs)
+              .map(|(_, st)| *st)
+              .unwrap_or_default();
+            let end = syn_bounds
+              .iter()
+              .map(|(s, _)| *s)
+              .find(|s| *s > abs)
+              .map(|next| next.saturating_sub(pos))
+              .unwrap_or(total)
+              .min(total);
+            if end <= start {
+              break;
+            }
+            let seg: String = text.chars().skip(start).take(end - start).collect();
+            out.push(ratatui::text::Span::styled(seg, style.bg(bg)));
+            start = end;
+          }
+        } else {
+          out.push(ratatui::text::Span::styled(
+            text.to_string(),
+            ratatui::style::Style::default().bg(bg),
+          ));
         }
-        ratatui::text::Span::styled(span.content.clone(), style)
-      })
-      .collect()
+      }
+      pos += line_len;
+    }
+    out
   }
 
   fn build_side_by_side_rows(
@@ -2706,7 +2747,8 @@ impl App {
         && let Some(t) = &temps[row_idx]
       {
         if let Some(inline) = &t.left_inline {
-          r.left_spans = Self::merge_inline_with_syntax(inline, line);
+          let kind = r.left_kind.unwrap_or(crate::diff::Kind::Context);
+          r.left_spans = Self::delta_styled_spans(inline, line, kind);
         } else {
           r.left_spans = line.clone();
         }
@@ -2718,7 +2760,8 @@ impl App {
         && let Some(t) = &temps[row_idx]
       {
         if let Some(inline) = &t.right_inline {
-          r.right_spans = Self::merge_inline_with_syntax(inline, line);
+          let kind = r.right_kind.unwrap_or(crate::diff::Kind::Context);
+          r.right_spans = Self::delta_styled_spans(inline, line, kind);
         } else {
           r.right_spans = line.clone();
         }
@@ -2766,17 +2809,28 @@ impl App {
         None
       };
 
-      // Determine the diff kind for styling (unused now, kept for potential future use)
-      let _diff_kind = match dl.status {
-        crate::diff::LineStatus::Added => crate::diff::Kind::Add,
+      // Word emphasis + delta tints on changed lines; plain syntax otherwise.
+      let kind = match dl.status {
+        crate::diff::LineStatus::Added | crate::diff::LineStatus::Modified => {
+          crate::diff::Kind::Add
+        }
         crate::diff::LineStatus::Removed => crate::diff::Kind::Remove,
-        crate::diff::LineStatus::Modified => crate::diff::Kind::Add,
         crate::diff::LineStatus::Unchanged => crate::diff::Kind::Context,
       };
 
-      let spans = syntax
-        .cloned()
-        .unwrap_or_else(|| vec![ratatui::text::Span::raw(dl.text.clone())]);
+      let spans = match (syntax.cloned(), dl.inline_spans.as_ref()) {
+        (Some(syn), inline) if kind != crate::diff::Kind::Context => {
+          let parts: Vec<crate::diff::InlineSpan> = inline.cloned().unwrap_or_else(|| {
+            vec![crate::diff::InlineSpan {
+              text: syn.iter().map(|s| s.content.to_string()).collect(),
+              emphasized: false,
+            }]
+          });
+          Self::delta_styled_spans(&parts, &syn, kind)
+        }
+        (Some(syn), _) => syn,
+        (None, _) => vec![ratatui::text::Span::raw(dl.text.clone())],
+      };
 
       rows.push(RenderRow::Decorated(DecoratedRow {
         status: dl.status,
@@ -3006,5 +3060,106 @@ mod tests {
 
     assert_eq!(app.diff_row_heights, vec![2]);
     assert_eq!(app.diff_total_visual_lines, 2);
+  }
+
+  #[test]
+  fn decorated_rows_carry_word_emphasis_on_changed_lines() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let repo = gix::init(td.path()).expect("init repo");
+    std::fs::write(td.path().join("main.rs"), "").expect("write rs");
+    let app = test_app(repo);
+
+    let before = "fn main() {\n    greet(\"hi\");\n}\n";
+    let after = "fn main() {\n    greet(\"hello\");\n}\n";
+    let rows = app
+      .build_decorated_rows("main.rs", Some(before), Some(after))
+      .expect("decorated rows");
+
+    let mut it = rows.into_iter().filter_map(|row| match row {
+      RenderRow::Decorated(r) => Some(r),
+      _ => None,
+    });
+
+    // Context row: syntax only, no tint.
+    let ctx = it.next().expect("context row");
+    assert!(ctx.spans.iter().all(|sp| sp.style.bg.is_none()));
+
+    // Changed row: tinted, with an emphasized segment on the changed word.
+    let changed = it.next().expect("changed row");
+    assert!(
+      changed
+        .spans
+        .iter()
+        .any(|sp| sp.style.bg == Some(crate::delta_style::PLUS_EMPH_BG))
+    );
+    assert!(changed
+      .spans
+      .iter()
+      .all(|sp| matches!(sp.style.bg, Some(b) if b == crate::delta_style::PLUS_BG || b == crate::delta_style::PLUS_EMPH_BG)));
+
+    // Closing brace row: unchanged context — no tint.
+    let tail = it.next().expect("tail row");
+    assert!(tail.spans.iter().all(|sp| sp.style.bg.is_none()));
+  }
+
+  #[test]
+  fn delta_styled_spans_split_emphasis_and_tint() {
+    use crate::diff::{InlineSpan, Kind};
+    use ratatui::style::{Color, Style};
+
+    let inline = vec![
+      InlineSpan {
+        text: "fn ".into(),
+        emphasized: false,
+      },
+      InlineSpan {
+        text: "main".into(),
+        emphasized: true,
+      },
+    ];
+    let syn = vec![
+      ratatui::text::Span::styled("fn ".to_string(), Style::default().fg(Color::Red)),
+      ratatui::text::Span::styled("main".to_string(), Style::default().fg(Color::Blue)),
+    ];
+
+    let plus = App::delta_styled_spans(&inline, &syn, Kind::Add);
+    assert_eq!(plus.len(), 2);
+    assert_eq!(plus[0].content.as_ref(), "fn ");
+    assert_eq!(plus[0].style.fg, Some(Color::Red));
+    assert_eq!(plus[0].style.bg, Some(crate::delta_style::PLUS_BG));
+    assert_eq!(plus[1].content.as_ref(), "main");
+    assert_eq!(plus[1].style.fg, Some(Color::Blue));
+    assert_eq!(plus[1].style.bg, Some(crate::delta_style::PLUS_EMPH_BG));
+
+    let minus = App::delta_styled_spans(&inline, &syn, Kind::Remove);
+    assert_eq!(minus.len(), 2);
+    assert_eq!(minus[0].content.as_ref(), "fn ");
+    assert_eq!(minus[0].style.fg, None);
+    assert_eq!(minus[0].style.bg, Some(crate::delta_style::MINUS_BG));
+    assert_eq!(minus[1].style.bg, Some(crate::delta_style::MINUS_EMPH_BG));
+
+    let ctx = App::delta_styled_spans(&inline, &syn, Kind::Context);
+    assert_eq!(ctx.len(), 2);
+    assert_eq!(ctx[0].style.fg, Some(Color::Red));
+    assert_eq!(ctx[0].style.bg, None);
+  }
+
+  #[test]
+  fn decorated_row_height_has_no_status_marker_column() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let repo = gix::init(td.path()).expect("init repo");
+    let mut app = test_app(repo);
+    app.diff_rows.push(RenderRow::Decorated(DecoratedRow {
+      status: crate::diff::LineStatus::Added,
+      line_number: 1,
+      old_line_number: None,
+      spans: vec![ratatui::text::Span::raw("x")],
+    }));
+
+    // Rendered row is "   1 │ x": 3 gutter cells + 4-col number + 3 + 1 = 11.
+    // The old +/- marker column added 2 cells, which would wrap at width 11.
+    app.recompute_diff_metrics(11);
+
+    assert_eq!(app.diff_row_heights, vec![1]);
   }
 }
