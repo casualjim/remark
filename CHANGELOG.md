@@ -1,8 +1,18 @@
+## [0.6.2] - 2026-08-30
+
+### 🚀 Features
+
+- Delta-style word emphasis in diff views
 ## [0.6.1] - 2026-05-19
 
 ### 🧪 Testing
 
 - Cover Go tab rendering
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.6.1 [ci skip]
+- Release remark version 0.6.1
 ## [0.6.0] - 2026-05-19
 
 ### 🚀 Features
